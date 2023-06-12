@@ -4,14 +4,18 @@ import (
 	"encoding/csv"
 	"fmt"
 	log "github.com/sirupsen/logrus"
+	"io/ioutil"
 	"jiaming2012/sales-processor/database"
 	"jiaming2012/sales-processor/models"
+	"jiaming2012/sales-processor/sftp"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
+
+const exportId = "113866"
 
 func Marshall(headers []string, row []string, position int) (*models.Sale, error) {
 	var item models.Sale
@@ -46,7 +50,7 @@ func Marshall(headers []string, row []string, position int) (*models.Sale, error
 			continue
 		case "Sales Category":
 			item.SalesCategory = row[i]
-		case "Gross Price":
+		case "Gross RequestedPrice":
 			val, err := strconv.ParseFloat(row[i], 64)
 			if err != nil {
 				return nil, err
@@ -58,7 +62,7 @@ func Marshall(headers []string, row []string, position int) (*models.Sale, error
 				return nil, err
 			}
 			item.Discount = val
-		case "Net Price":
+		case "Net RequestedPrice":
 			val, err := strconv.ParseFloat(row[i], 64)
 			if err != nil {
 				return nil, err
@@ -186,10 +190,62 @@ func run(filename string) error {
 	return nil
 }
 
+func fetchReport(date string) {
+	pk, err := ioutil.ReadFile("creds/id_rsa") // required only if private key authentication is to be used
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	config := sftp.Config{
+		Username:   "YumYumsExportUser",
+		PrivateKey: string(pk), // required only if private key authentication is to be used
+		Server:     "s-9b0f88558b264dfda.server.transfer.us-east-1.amazonaws.com:22",
+		//KeyExchanges: []string{"diffie-hellman-group-exchange-sha256", "diffie-hellman-group14-sha256"}, // optional
+		Timeout: time.Second * 30, // 0 for not timeout
+	}
+
+	client, err := sftp.New(config)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer client.Close()
+
+	// Download remote file.
+	file, err := client.Download(fmt.Sprintf("/%s/%s/OrderDetails.csv", exportId, date))
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer file.Close()
+
+	// Read downloaded file.
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	exportFileName := fmt.Sprintf("%s_OrderDetails.csv", date)
+	if fileErr := os.WriteFile(exportFileName, data, 0644); fileErr != nil {
+		panic(fileErr)
+	}
+}
+
+/*
+sftp> ls
+AccountingReport.xls
+AllItemsReport.csv
+ItemSelectionDetails.csv
+MenuExportV2_eb1500fd-93a2-4f51-8d09-9e2df9b1b334.json
+MenuExport_eb1500fd-93a2-4f51-8d09-9e2df9b1b334.json
+ModifiersSelectionDetails.csv
+OrderDetails.csv
+PaymentDetails.csv
+*/
+
 func main() {
-	setupDB()
-	iterateDirectory("sales/unprocessed")
-	log.Info("Successfully ran sales processor")
+	fetchReport("20230611")
+	//setupDB()
+	//iterateDirectory("sales/unprocessed")
+	//log.Info("Successfully ran sales processor")
 }
 
 func readData(fileName string) ([]*models.Sale, error) {
