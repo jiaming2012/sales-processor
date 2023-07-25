@@ -1,12 +1,20 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/csv"
 	"fmt"
+	"github.com/gocarina/gocsv"
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/api/option"
+	googlesheets "google.golang.org/api/sheets/v4"
 	"io/ioutil"
 	"jiaming2012/sales-processor/database"
 	"jiaming2012/sales-processor/models"
+	"jiaming2012/sales-processor/service"
+	"jiaming2012/sales-processor/service/external"
+	"jiaming2012/sales-processor/service/sheets"
 	"jiaming2012/sales-processor/sftp"
 	"os"
 	"path/filepath"
@@ -15,7 +23,10 @@ import (
 	"time"
 )
 
-const exportId = "113866"
+const (
+	exportId                  = "113866"
+	sheetsSpreadsheetAllCells = "2:1010"
+)
 
 func Marshall(headers []string, row []string, position int) (*models.Sale, error) {
 	var item models.Sale
@@ -74,7 +85,7 @@ func Marshall(headers []string, row []string, position int) (*models.Sale, error
 				return nil, err
 			}
 			item.Quantity = val
-		case "Tax":
+		case "Taxes":
 			val, err := strconv.ParseFloat(row[i], 64)
 			if err != nil {
 				return nil, err
@@ -190,7 +201,7 @@ func run(filename string) error {
 	return nil
 }
 
-func fetchReport(date string) {
+func fetchOrderDetails(date string) []*models.OrderDetail {
 	pk, err := ioutil.ReadFile("creds/id_rsa") // required only if private key authentication is to be used
 	if err != nil {
 		log.Fatalln(err)
@@ -200,8 +211,7 @@ func fetchReport(date string) {
 		Username:   "YumYumsExportUser",
 		PrivateKey: string(pk), // required only if private key authentication is to be used
 		Server:     "s-9b0f88558b264dfda.server.transfer.us-east-1.amazonaws.com:22",
-		//KeyExchanges: []string{"diffie-hellman-group-exchange-sha256", "diffie-hellman-group14-sha256"}, // optional
-		Timeout: time.Second * 30, // 0 for not timeout
+		Timeout:    time.Second * 30, // 0 for not timeout
 	}
 
 	client, err := sftp.New(config)
@@ -217,32 +227,261 @@ func fetchReport(date string) {
 	}
 	defer file.Close()
 
-	// Read downloaded file.
-	data, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalln(err)
+	var orderDetails []*models.OrderDetail
+
+	if err = gocsv.Unmarshal(file, &orderDetails); err != nil {
+		log.Fatal(err)
 	}
 
-	exportFileName := fmt.Sprintf("%s_OrderDetails.csv", date)
-	if fileErr := os.WriteFile(exportFileName, data, 0644); fileErr != nil {
-		panic(fileErr)
+	return orderDetails
+}
+
+func groupOrderDetailsByServer(orderDetails []*models.OrderDetail) map[string][]*models.OrderDetail {
+	data := make(map[string][]*models.OrderDetail)
+
+	for _, o := range orderDetails {
+		if _, found := data[o.Server]; !found {
+			data[o.Server] = make([]*models.OrderDetail, 0)
+		}
+
+		data[o.Server] = append(data[o.Server], o)
+	}
+
+	return data
+}
+
+func ProcessOrderDetails(orderDetails []*models.OrderDetail) models.DailySummary {
+	serverDetails := groupOrderDetailsByServer(orderDetails)
+
+	var netSales, totalTaxes, totalTips float64
+	for server, details := range serverDetails {
+		fmt.Println("server: ", server)
+		summary := models.OrderDetails(details).GetSummary()
+		fmt.Println(summary)
+
+		netSales += summary.TotalSales
+		totalTaxes += summary.TotalTaxes
+		totalTips += summary.TotalTips
+	}
+
+	return models.DailySummary{
+		Sales: netSales,
+		Taxes: totalTaxes,
+		Tips:  totalTips,
 	}
 }
 
-/*
-sftp> ls
-AccountingReport.xls
-AllItemsReport.csv
-ItemSelectionDetails.csv
-MenuExportV2_eb1500fd-93a2-4f51-8d09-9e2df9b1b334.json
-MenuExport_eb1500fd-93a2-4f51-8d09-9e2df9b1b334.json
-ModifiersSelectionDetails.csv
-OrderDetails.csv
-PaymentDetails.csv
-*/
+//type TipShare struct {
+//	Total
+//}
+func CalcTipShare(durationWorked time.Duration) int {
+	if durationWorked.Hours() >= 6 {
+		return 3
+	} else if durationWorked.Hours() >= 4 {
+		return 2
+	} else if durationWorked.Hours() >= 2 {
+		return 1
+	} else {
+		return 0
+	}
+}
+
+//6+ -> evenly
+//4 - 6 -> 66%
+//2 - 4 -> 33%
+//<2 -> 0%
+
+func CalculateWeeklyNumbers(weeklyReport map[time.Time]models.DailySummary, timesheet models.Timesheet) models.WeeklySummary {
+	var tipDetails models.TipDetails
+	tipDetails.Details = make(map[models.Employee]float64)
+	totalSales := 0.0
+	totalTaxes := 0.0
+
+	for reportTime, summary := range weeklyReport {
+		tipsShare := make(map[models.Employee]int)
+		schedule := timesheet[reportTime.Weekday()]
+
+		tipPool := 0
+		for employee, shifts := range schedule.Shifts {
+			for _, shift := range shifts {
+				if shift.IsTipped {
+					tips := CalcTipShare(shift.DurationElapsed())
+					tipsShare[employee] = tips
+					tipPool += tips
+				}
+			}
+		}
+
+		for employee, _ := range schedule.Shifts {
+			tipDetails.Details[employee] += (float64(tipsShare[employee]) / float64(tipPool)) * summary.Tips
+		}
+
+		totalSales += summary.Sales
+		totalTaxes += summary.Taxes
+		tipDetails.Total += summary.Tips
+	}
+
+	return models.WeeklySummary{
+		Tips:  tipDetails,
+		Sales: totalSales,
+		Taxes: totalTaxes,
+	}
+}
+
+type LaborReport []models.EmployeeHours
+
+func (r LaborReport) Show() string {
+	output := strings.Builder{}
+
+	output.WriteString("Labor Breakdown\n")
+
+	for _, employeeHours := range r {
+		output.WriteString(fmt.Sprintf("%v: %.2f hours\n", employeeHours.Employee.Name(), employeeHours.Hours))
+	}
+
+	return output.String()
+}
+
+func setup(ctx context.Context) (*googlesheets.Service, error) {
+	// get bytes from base64 encoded google service accounts key
+	credBytes, err := base64.StdEncoding.DecodeString(os.Getenv("KEY_JSON_BASE64"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to base64 decode KEY_JSON_BASE64: %w", err)
+	}
+
+	// create new service using client
+	sheetsSrv, err := googlesheets.NewService(ctx, option.WithCredentialsJSON(credBytes))
+	if err != nil {
+		return nil, fmt.Errorf("unable initiate google sheets client: %w", err)
+	}
+
+	return sheetsSrv, nil
+}
 
 func main() {
-	fetchReport("20230611")
+	baseURL := "https://api.getsling.com/v1"
+	slingEmail := "jamal@yumyums.kitchen"
+	slingPassword := "9@^P9bZR7RGu37zk"
+	commissionBasedEmployees := []string{"tanya@yumyums.kitchen"}
+	cashWithdrawalResponsesID := "1v3mSj-ZeKcDkplaAZBuva1dVOe7_Hf9O9z2o8YW_zfk"
+	exclusions := []models.TipExclusion{
+		{
+			UserID: 14018513,
+			Day:    time.Sunday,
+		},
+	}
+
+	ctx := context.Background()
+
+	// fetch dates in reporting period
+	dates := service.GetDatesStartingFromPreviousMonday()
+
+	// setup google sheets
+	sheetsSrv, err := setup(ctx)
+	if err != nil {
+		panic(err)
+	}
+
+	sheetsClients := sheets.NewClient(sheetsSrv)
+
+	// fetch cash with held
+	rows, err := sheetsClients.FetchRows(ctx, cashWithdrawalResponsesID, "Withdrawals", sheetsSpreadsheetAllCells)
+	if err != nil {
+		panic(err)
+	}
+
+	cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("-----------------------")
+	fmt.Println("CASH HELD")
+	fmt.Println("-----------------------")
+	cash := models.CashWithdrawals(cashWithdrawals)
+	for employee, amount := range cash.Sum() {
+		fmt.Printf("%v: $%.2f\n", employee, amount)
+	}
+	fmt.Println("-----------------------")
+
+	slingClient, err := external.NewSlingTimesheet(baseURL, slingEmail, slingPassword)
+	if err != nil {
+		panic(err)
+	}
+
+	if err = slingClient.PopulateUsers(commissionBasedEmployees); err != nil {
+		panic(err)
+	}
+
+	fromDate := dates[0].Format("2006-01-02")
+	toDate := dates[len(dates)-1].Format("2006-01-02")
+
+	timesheet, err := slingClient.GetPayroll(fromDate, toDate)
+	if err != nil {
+		panic(err)
+	}
+
+	var employeeHours []models.EmployeeHours
+	for user, i := range timesheet {
+		if user.IsCommissionBasedEmployee {
+			log.Debugf("skip summing hours for commission based employee %v", user)
+			continue
+		}
+
+		hours, err := external.SlingTimesheetItemShifts(i).GetTotalHours()
+		if err != nil {
+			panic(err)
+		}
+
+		employeeHours = append(employeeHours, models.EmployeeHours{
+			Employee: user,
+			Hours:    hours,
+		})
+	}
+
+	weeklyReport := make(map[time.Time]models.DailySummary)
+
+	for _, date := range dates {
+		fmt.Println("-----------------------")
+		fmt.Printf("Report for %s %s\n", date.Weekday(), date.Format("2006/01/02"))
+		fmt.Println("-----------------------")
+		orderDetails := fetchOrderDetails(date.Format("20060102"))
+		summary := ProcessOrderDetails(orderDetails)
+
+		fmt.Printf("net sales: $%.2f\n", summary.Sales)
+		fmt.Printf("sales tax: $%.2f\n", summary.Taxes)
+		fmt.Printf("total tips: $%.2f\n (C.C. Fee = $%.2f)\n", summary.Tips*0.97, summary.Tips*0.03)
+		weeklyReport[date] = summary
+	}
+
+	//timesheetStub := external.TimesheetStub{}
+	//timesheet, err := timesheetStub.FetchTimesheet()
+	if err != nil {
+		panic(err)
+	}
+
+	ts, err := timesheet.FetchTimesheet(exclusions)
+	if err != nil {
+		panic(err)
+	}
+
+	weeklySummary := CalculateWeeklyNumbers(weeklyReport, ts)
+	fmt.Println("-----------------------")
+	fmt.Println("SUMMARY")
+	fmt.Println("-----------------------")
+	fmt.Printf("Net Sales: $%.2f\n", weeklySummary.Sales)
+	fmt.Printf("Taxes: $%.2f\n", weeklySummary.Taxes)
+	fmt.Printf("Tips: $%.2f\n", weeklySummary.Tips.Total)
+	fmt.Println("-----------------------")
+	fmt.Println("Tips Breakdown")
+
+	for employee, amount := range weeklySummary.Tips.Details {
+		fmt.Printf("%s: $%.2f\n", employee, amount)
+	}
+
+	fmt.Println("-----------------------")
+	fmt.Println(LaborReport(employeeHours).Show())
+
 	//setupDB()
 	//iterateDirectory("sales/unprocessed")
 	//log.Info("Successfully ran sales processor")
