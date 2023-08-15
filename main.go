@@ -426,7 +426,7 @@ func main() {
 	dailyReport := make(map[time.Time]models.DailySummary)
 
 	for _, date := range dates {
-		fmt.Printf("%s %s\n", date.Weekday(), date.Format("2006/01/02"))
+		fmt.Printf("%s: %s\n", date.Weekday(), date.Format("2006/01/02"))
 		fmt.Printf("-----------------------\n")
 		orderDetails := fetchOrderDetails(date.Format("20060102"))
 		summary := ProcessOrderDetails(orderDetails)
