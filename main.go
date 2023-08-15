@@ -425,12 +425,15 @@ func main() {
 
 	dailyReport := make(map[time.Time]models.DailySummary)
 
+	fmt.Printf("\n")
+
 	for _, date := range dates {
 		fmt.Printf("%s: %s\n", date.Weekday(), date.Format("2006/01/02"))
 		fmt.Printf("-----------------------\n")
 		orderDetails := fetchOrderDetails(date.Format("20060102"))
 		summary := ProcessOrderDetails(orderDetails)
 		fmt.Print(summary.Show())
+		fmt.Printf("\n")
 		fmt.Printf("\n")
 
 		//fmt.Printf("sales tax: $%.2f\n", summary.Taxes)
