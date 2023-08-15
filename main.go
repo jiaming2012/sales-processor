@@ -12,6 +12,7 @@ import (
 	"io/ioutil"
 	"jiaming2012/sales-processor/database"
 	"jiaming2012/sales-processor/models"
+	"jiaming2012/sales-processor/payroll"
 	"jiaming2012/sales-processor/service"
 	"jiaming2012/sales-processor/service/external"
 	"jiaming2012/sales-processor/service/sheets"
@@ -221,9 +222,10 @@ func fetchOrderDetails(date string) []*models.OrderDetail {
 	defer client.Close()
 
 	// Download remote file.
-	file, err := client.Download(fmt.Sprintf("/%s/%s/OrderDetails.csv", exportId, date))
+	fName := fmt.Sprintf("/%s/%s/OrderDetails.csv", exportId, date)
+	file, err := client.Download(fName)
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalln(fmt.Errorf("failed to download %v: %w", fName, err))
 	}
 	defer file.Close()
 
@@ -254,20 +256,21 @@ func ProcessOrderDetails(orderDetails []*models.OrderDetail) models.DailySummary
 	serverDetails := groupOrderDetailsByServer(orderDetails)
 
 	var netSales, totalTaxes, totalTips float64
+	employeeDetails := make(map[models.Employee][]*models.OrderDetail)
 	for server, details := range serverDetails {
-		fmt.Println("server: ", server)
 		summary := models.OrderDetails(details).GetSummary()
-		fmt.Println(summary)
 
 		netSales += summary.TotalSales
 		totalTaxes += summary.TotalTaxes
 		totalTips += summary.TotalTips
+		employeeDetails[models.Employee(server)] = details
 	}
 
 	return models.DailySummary{
-		Sales: netSales,
-		Taxes: totalTaxes,
-		Tips:  totalTips,
+		Sales:           netSales,
+		Taxes:           totalTaxes,
+		Tips:            totalTips,
+		EmployeeDetails: employeeDetails,
 	}
 }
 
@@ -291,7 +294,7 @@ func CalcTipShare(durationWorked time.Duration) int {
 //2 - 4 -> 33%
 //<2 -> 0%
 
-func CalculateWeeklyNumbers(weeklyReport map[time.Time]models.DailySummary, timesheet models.Timesheet) models.WeeklySummary {
+func CalculateWeeklyReport(weeklyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours) models.WeeklySummary {
 	var tipDetails models.TipDetails
 	tipDetails.Details = make(map[models.Employee]float64)
 	totalSales := 0.0
@@ -325,22 +328,15 @@ func CalculateWeeklyNumbers(weeklyReport map[time.Time]models.DailySummary, time
 		Tips:  tipDetails,
 		Sales: totalSales,
 		Taxes: totalTaxes,
+		Hours: employeeHours,
 	}
 }
 
-type LaborReport []models.EmployeeHours
+//type LaborReport []models.EmployeeHours
 
-func (r LaborReport) Show() string {
-	output := strings.Builder{}
+//func (r LaborReport) Show() string {
 
-	output.WriteString("Labor Breakdown\n")
-
-	for _, employeeHours := range r {
-		output.WriteString(fmt.Sprintf("%v: %.2f hours\n", employeeHours.Employee.Name(), employeeHours.Hours))
-	}
-
-	return output.String()
-}
+//}
 
 func setup(ctx context.Context) (*googlesheets.Service, error) {
 	// get bytes from base64 encoded google service accounts key
@@ -359,21 +355,23 @@ func setup(ctx context.Context) (*googlesheets.Service, error) {
 }
 
 func main() {
+	//
 	baseURL := "https://api.getsling.com/v1"
 	slingEmail := "jamal@yumyums.kitchen"
 	slingPassword := "9@^P9bZR7RGu37zk"
 	commissionBasedEmployees := []string{"tanya@yumyums.kitchen"}
 	cashWithdrawalResponsesID := "1v3mSj-ZeKcDkplaAZBuva1dVOe7_Hf9O9z2o8YW_zfk"
 	exclusions := []models.TipExclusion{
-		{
-			UserID: 14018513,
-			Day:    time.Sunday,
-		},
+		//{
+		//	UserID: 14018513,
+		//	Day:    time.Sunday,
+		//},
 	}
 
 	ctx := context.Background()
 
 	// fetch dates in reporting period
+	// todo: we should dump these into a database the next day. Toast only keeps the last 7 days
 	dates := service.GetDatesStartingFromPreviousMonday()
 
 	// setup google sheets
@@ -389,20 +387,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-
-	cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println("-----------------------")
-	fmt.Println("CASH HELD")
-	fmt.Println("-----------------------")
-	cash := models.CashWithdrawals(cashWithdrawals)
-	for employee, amount := range cash.Sum() {
-		fmt.Printf("%v: $%.2f\n", employee, amount)
-	}
-	fmt.Println("-----------------------")
 
 	slingClient, err := external.NewSlingTimesheet(baseURL, slingEmail, slingPassword)
 	if err != nil {
@@ -439,19 +423,19 @@ func main() {
 		})
 	}
 
-	weeklyReport := make(map[time.Time]models.DailySummary)
+	dailyReport := make(map[time.Time]models.DailySummary)
 
 	for _, date := range dates {
-		fmt.Println("-----------------------")
-		fmt.Printf("Report for %s %s\n", date.Weekday(), date.Format("2006/01/02"))
-		fmt.Println("-----------------------")
+		fmt.Printf("%s %s\n", date.Weekday(), date.Format("2006/01/02"))
+		fmt.Printf("-----------------------\n")
 		orderDetails := fetchOrderDetails(date.Format("20060102"))
 		summary := ProcessOrderDetails(orderDetails)
+		fmt.Print(summary.Show())
+		fmt.Printf("\n")
 
-		fmt.Printf("net sales: $%.2f\n", summary.Sales)
-		fmt.Printf("sales tax: $%.2f\n", summary.Taxes)
-		fmt.Printf("total tips: $%.2f\n (C.C. Fee = $%.2f)\n", summary.Tips*0.97, summary.Tips*0.03)
-		weeklyReport[date] = summary
+		//fmt.Printf("sales tax: $%.2f\n", summary.Taxes)
+		//fmt.Printf("total tips: $%.2f\n (C.C. Fee = $%.2f)\n", summary.Tips*0.97, summary.Tips*0.03)
+		dailyReport[date] = summary
 	}
 
 	//timesheetStub := external.TimesheetStub{}
@@ -465,22 +449,59 @@ func main() {
 		panic(err)
 	}
 
-	weeklySummary := CalculateWeeklyNumbers(weeklyReport, ts)
-	fmt.Println("-----------------------")
-	fmt.Println("SUMMARY")
-	fmt.Println("-----------------------")
-	fmt.Printf("Net Sales: $%.2f\n", weeklySummary.Sales)
-	fmt.Printf("Taxes: $%.2f\n", weeklySummary.Taxes)
-	fmt.Printf("Tips: $%.2f\n", weeklySummary.Tips.Total)
-	fmt.Println("-----------------------")
-	fmt.Println("Tips Breakdown")
+	weeklySummary := CalculateWeeklyReport(dailyReport, ts, employeeHours)
+	fmt.Println(weeklySummary.Show())
+	fmt.Printf("\n")
+	fmt.Printf("\n")
 
-	for employee, amount := range weeklySummary.Tips.Details {
-		fmt.Printf("%s: $%.2f\n", employee, amount)
+	fmt.Println("Cash Held")
+	fmt.Println("-----------------------")
+	cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
+	if err != nil {
+		panic(err)
 	}
 
-	fmt.Println("-----------------------")
-	fmt.Println(LaborReport(employeeHours).Show())
+	cash := models.CashWithdrawals(cashWithdrawals)
+	for employee, amount := range cash.Sum() {
+		fmt.Printf("%v: $%.2f\n", employee, amount)
+	}
+
+	// export to csv
+	// todo: get rate from Sling
+	var entries []payroll.Entry
+	for _, empl := range weeklySummary.Hours {
+		entries = append(entries, payroll.Entry{
+			Type:           payroll.PayItem,
+			PayID:          payroll.Regular,
+			EmployeeNumber: empl.Employee.EmployeeID,
+			HoursAmount:    empl.Hours,
+			Rate:           empl.Employee.Rate,
+			TreatAsCash:    payroll.RequiresHours,
+			CashAmount:     "",
+		})
+
+		// todo: make employee conversion less janky
+		employee := models.Employee(empl.Employee.Name())
+		tip := weeklySummary.Tips.Details[employee]
+		if tip > 0 {
+			entries = append(entries, payroll.Entry{
+				Type:           payroll.PayItem,
+				PayID:          payroll.ControlledTips,
+				EmployeeNumber: empl.Employee.EmployeeID,
+				TreatAsCash:    payroll.DoesNotRequireHours,
+				CashAmount:     strconv.FormatFloat(tip, 'f', 2, 64),
+			})
+		}
+	}
+
+	f, err := os.Create(fmt.Sprintf("payroll_%v.csv", toDate))
+	if err != nil {
+		panic(err)
+	}
+
+	if err := payroll.Entries(entries).ToCSV(f); err != nil {
+		panic(err)
+	}
 
 	//setupDB()
 	//iterateDirectory("sales/unprocessed")

@@ -157,7 +157,7 @@ func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (Sling
 }
 
 func (c *slingTimesheetClient) PopulateUsers(commissionBasedEmployeesEmails []string) error {
-	usersURL := fmt.Sprintf("%s/users", c.baseURL)
+	usersURL := fmt.Sprintf("%s/users/concise", c.baseURL)
 
 	c.users = make(map[int]models.SlingUser)
 
@@ -175,23 +175,19 @@ func (c *slingTimesheetClient) PopulateUsers(commissionBasedEmployeesEmails []st
 	}
 	defer resp.Body.Close()
 
-	var users []models.SlingUser
-	if err = json.NewDecoder(resp.Body).Decode(&users); err != nil {
+	var slingDTO models.SlingsUsersDTO
+	if err = json.NewDecoder(resp.Body).Decode(&slingDTO); err != nil {
 		return err
 	}
 
-	for _, user := range users {
-		if user.Active {
-			user.IsCommissionBasedEmployee = false
-			for _, email := range commissionBasedEmployeesEmails {
-				if user.Email == email {
-					user.IsCommissionBasedEmployee = true
-					break
-				}
-			}
-			c.users[user.ID] = user
-		} else {
-			log.Debugf("ignoring user %v because the user is not active", user)
+	for _, dto := range slingDTO.Users {
+		user, found, dtoErr := dto.ToSlingUser(commissionBasedEmployeesEmails)
+		if dtoErr != nil {
+			return fmt.Errorf("failed to convert dto: %w", dtoErr)
+		}
+
+		if found {
+			c.users[user.ID] = *user
 		}
 	}
 

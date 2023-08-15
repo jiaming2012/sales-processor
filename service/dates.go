@@ -23,7 +23,7 @@ func GetDatesStartingFromPreviousMonday() []time.Time {
 	previousMonday := sunday.AddDate(0, 0, -daysSinceMonday)
 
 	// Generate dates starting from the previous Monday
-	for i := 0; i < 7; i++ {
+	for i := 2; i < 7; i++ {
 		date := previousMonday.AddDate(0, 0, i)
 		dates = append(dates, date)
 	}
