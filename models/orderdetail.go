@@ -77,6 +77,7 @@ type OrderDetail struct {
 	OrderNumber   int           `csv:"Order #"`
 	Checks        int           `csv:"Checks"`
 	Opened        DateTime      `csv:"Opened"`
+	TabNames      string        `csv:"Tab Names"`
 	Server        string        `csv:"Server"`
 	Service       string        `csv:"Service"`
 	DiningOptions string        `csv:"Dining Options"`

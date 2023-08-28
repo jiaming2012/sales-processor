@@ -247,7 +247,7 @@ func (p SlingPayroll) FetchTimesheet(tipExclusions []models.TipExclusion) (model
 
 			// todo: add role to allow changing tips
 			for _, exclusion := range tipExclusions {
-				if user.ID == exclusion.UserID && weekday == exclusion.Day {
+				if user.EmployeeID == exclusion.EmployeeID && weekday == exclusion.Day {
 					s.IsTipped = false
 				}
 			}

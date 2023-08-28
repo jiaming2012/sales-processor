@@ -15,7 +15,6 @@ import (
 	"jiaming2012/sales-processor/payroll"
 	"jiaming2012/sales-processor/service"
 	"jiaming2012/sales-processor/service/external"
-	"jiaming2012/sales-processor/service/sheets"
 	"jiaming2012/sales-processor/sftp"
 	"os"
 	"path/filepath"
@@ -238,22 +237,58 @@ func fetchOrderDetails(date string) []*models.OrderDetail {
 	return orderDetails
 }
 
-func groupOrderDetailsByServer(orderDetails []*models.OrderDetail) map[string][]*models.OrderDetail {
-	data := make(map[string][]*models.OrderDetail)
+func groupOrderDetailsByServer(orderDetails []*models.OrderDetail) map[models.Server][]*models.OrderDetail {
+	data := make(map[models.Server][]*models.OrderDetail)
 
 	for _, o := range orderDetails {
-		if _, found := data[o.Server]; !found {
-			data[o.Server] = make([]*models.OrderDetail, 0)
+		server := models.Server(o.Server)
+
+		if found, company := models.IsDeliveryOrder(o); found {
+			server = models.Server(company)
 		}
 
-		data[o.Server] = append(data[o.Server], o)
+		if _, found := data[server]; !found {
+			data[server] = make([]*models.OrderDetail, 0)
+		}
+
+		data[server] = append(data[server], o)
 	}
 
 	return data
 }
 
-func ProcessOrderDetails(orderDetails []*models.OrderDetail) models.DailySummary {
+func getThirdPartyOrders(orderDetails []*models.OrderDetail) (models.ThirdPartyMerchantOrders, error) {
+	grubhubOrders := make(models.OrderDetails, 0)
+	uberOrders := make(models.OrderDetails, 0)
+	doordashOrders := make(models.OrderDetails, 0)
+
+	for _, o := range orderDetails {
+		if found, company := models.IsDeliveryOrder(o); found {
+			switch company {
+			case "Grubhub":
+				grubhubOrders = append(grubhubOrders, o)
+			case "Uber Eats":
+				uberOrders = append(uberOrders, o)
+			case "DoorDash":
+				doordashOrders = append(doordashOrders, o)
+			default:
+				return models.ThirdPartyMerchantOrders{}, fmt.Errorf("getThirdPartyOrders: unknown company %v", company)
+			}
+		}
+	}
+	return models.ThirdPartyMerchantOrders{
+		Grubhub:  grubhubOrders,
+		Uber:     uberOrders,
+		DoorDash: doordashOrders,
+	}, nil
+}
+
+func ProcessOrderDetails(orderDetails []*models.OrderDetail) (models.DailySummary, error) {
 	serverDetails := groupOrderDetailsByServer(orderDetails)
+	thirdPartyOrders, err := getThirdPartyOrders(orderDetails)
+	if err != nil {
+		return models.DailySummary{}, fmt.Errorf("ProcessOrderDetails: failed to get third party orders: %w", err)
+	}
 
 	var netSales, totalTaxes, totalTips float64
 	employeeDetails := make(map[models.Employee][]*models.OrderDetail)
@@ -261,17 +296,23 @@ func ProcessOrderDetails(orderDetails []*models.OrderDetail) models.DailySummary
 		summary := models.OrderDetails(details).GetSummary()
 
 		netSales += summary.TotalSales
-		totalTaxes += summary.TotalTaxes
 		totalTips += summary.TotalTips
 		employeeDetails[models.Employee(server)] = details
+
+		if server.IsDeliveryService() {
+			log.Debugf("ignores taxes of %.2f for %s delivery server", summary.TotalTaxes, server)
+		} else {
+			totalTaxes += summary.TotalTaxes
+		}
 	}
 
 	return models.DailySummary{
-		Sales:           netSales,
-		Taxes:           totalTaxes,
-		Tips:            totalTips,
-		EmployeeDetails: employeeDetails,
-	}
+		Sales:            netSales,
+		Taxes:            totalTaxes,
+		Tips:             totalTips,
+		EmployeeDetails:  employeeDetails,
+		ThirdPartyOrders: thirdPartyOrders,
+	}, nil
 }
 
 //type TipShare struct {
@@ -294,13 +335,13 @@ func CalcTipShare(durationWorked time.Duration) int {
 //2 - 4 -> 33%
 //<2 -> 0%
 
-func CalculateWeeklyReport(weeklyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours) models.WeeklySummary {
+func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours) models.WeeklySummary {
 	var tipDetails models.TipDetails
 	tipDetails.Details = make(map[models.Employee]float64)
 	totalSales := 0.0
 	totalTaxes := 0.0
 
-	for reportTime, summary := range weeklyReport {
+	for reportTime, summary := range dailyReport {
 		tipsShare := make(map[models.Employee]int)
 		schedule := timesheet[reportTime.Weekday()]
 
@@ -354,39 +395,104 @@ func setup(ctx context.Context) (*googlesheets.Service, error) {
 	return sheetsSrv, nil
 }
 
+type ThirdPartyOrdersReportItem struct {
+	Date   time.Time
+	Orders models.ThirdPartyMerchantOrders
+}
+
+type ThirdPartyOrdersReport []ThirdPartyOrdersReportItem
+
+func (r *ThirdPartyOrdersReport) Add(date time.Time, orders models.ThirdPartyMerchantOrders) {
+	*r = append(*r, ThirdPartyOrdersReportItem{
+		Date:   date,
+		Orders: orders,
+	})
+}
+
+func (r *ThirdPartyOrdersReport) Show() string {
+	report := strings.Builder{}
+
+	report.WriteString("\nThird Party Orders\n")
+	report.WriteString("-----------------------\n")
+
+	for _, item := range *r {
+		report.WriteString(item.Date.String() + "\n")
+
+		if len(item.Orders.Uber) > 0 {
+			report.WriteString("Uber Orders:\n")
+			for _, o := range item.Orders.Uber {
+				report.WriteString(fmt.Sprintf("%v - #%v - %v - $%.2f\n", o.Opened, o.OrderNumber, o.TabNames, o.Amount))
+			}
+		}
+
+		if len(item.Orders.Grubhub) > 0 {
+			report.WriteString("Grubhub Orders:\n")
+			for _, o := range item.Orders.Grubhub {
+				report.WriteString(fmt.Sprintf("%v - #%v - %v - $%.2f\n", o.Opened, o.OrderNumber, o.TabNames, o.Amount))
+			}
+		}
+
+		if len(item.Orders.DoorDash) > 0 {
+			report.WriteString("DoorDash Orders:\n")
+			for _, o := range item.Orders.DoorDash {
+				report.WriteString(fmt.Sprintf("%v - #%v - %v - $%.2f\n", o.Opened, o.OrderNumber, o.TabNames, o.Amount))
+			}
+		}
+	}
+
+	return report.String()
+}
+
 func main() {
-	//
+	// KEY_JSON_BASE64
+
 	baseURL := "https://api.getsling.com/v1"
 	slingEmail := "jamal@yumyums.kitchen"
 	slingPassword := "9@^P9bZR7RGu37zk"
-	commissionBasedEmployees := []string{"tanya@yumyums.kitchen"}
-	cashWithdrawalResponsesID := "1v3mSj-ZeKcDkplaAZBuva1dVOe7_Hf9O9z2o8YW_zfk"
+	commissionBasedEmployees := []string{"tanya@yumyums.kitchen", "jamal@yumyums.kitchen"}
+	//cashWithdrawalResponsesID := "1v3mSj-ZeKcDkplaAZBuva1dVOe7_Hf9O9z2o8YW_zfk"
 	exclusions := []models.TipExclusion{
-		//{
-		//	UserID: 14018513,
-		//	Day:    time.Sunday,
-		//},
+		{
+			EmployeeID: 100,
+			Day:        time.Wednesday,
+		},
+		{
+			EmployeeID: 100,
+			Day:        time.Thursday,
+		},
+		{
+			EmployeeID: 100,
+			Day:        time.Friday,
+		},
+		{
+			EmployeeID: 100,
+			Day:        time.Saturday,
+		},
+		{
+			EmployeeID: 100,
+			Day:        time.Sunday,
+		},
 	}
 
-	ctx := context.Background()
+	//ctx := context.Background()
 
 	// fetch dates in reporting period
 	// todo: we should dump these into a database the next day. Toast only keeps the last 7 days
 	dates := service.GetDatesStartingFromPreviousMonday()
 
 	// setup google sheets
-	sheetsSrv, err := setup(ctx)
-	if err != nil {
-		panic(err)
-	}
-
-	sheetsClients := sheets.NewClient(sheetsSrv)
-
-	// fetch cash with held
-	rows, err := sheetsClients.FetchRows(ctx, cashWithdrawalResponsesID, "Withdrawals", sheetsSpreadsheetAllCells)
-	if err != nil {
-		panic(err)
-	}
+	//sheetsSrv, err := setup(ctx)
+	//if err != nil {
+	//	panic(err)
+	//}
+	//
+	//sheetsClients := sheets.NewClient(sheetsSrv)
+	//
+	//// fetch cash with held
+	//rows, err := sheetsClients.FetchRows(ctx, cashWithdrawalResponsesID, "Withdrawals", sheetsSpreadsheetAllCells)
+	//if err != nil {
+	//	panic(err)
+	//}
 
 	slingClient, err := external.NewSlingTimesheet(baseURL, slingEmail, slingPassword)
 	if err != nil {
@@ -426,15 +532,21 @@ func main() {
 	dailyReport := make(map[time.Time]models.DailySummary)
 
 	fmt.Printf("\n")
-
+	var thirdPartyOrdersReport ThirdPartyOrdersReport
 	for _, date := range dates {
 		fmt.Printf("%s: %s\n", date.Weekday(), date.Format("2006/01/02"))
 		fmt.Printf("-----------------------\n")
 		orderDetails := fetchOrderDetails(date.Format("20060102"))
-		summary := ProcessOrderDetails(orderDetails)
+		summary, err := ProcessOrderDetails(orderDetails)
+		if err != nil {
+			panic(err)
+		}
+
 		fmt.Print(summary.Show())
 		fmt.Printf("\n")
 		fmt.Printf("\n")
+
+		thirdPartyOrdersReport.Add(date, summary.ThirdPartyOrders)
 
 		//fmt.Printf("sales tax: $%.2f\n", summary.Taxes)
 		//fmt.Printf("total tips: $%.2f\n (C.C. Fee = $%.2f)\n", summary.Tips*0.97, summary.Tips*0.03)
@@ -459,15 +571,17 @@ func main() {
 
 	fmt.Println("Cash Held")
 	fmt.Println("-----------------------")
-	cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
-	if err != nil {
-		panic(err)
-	}
 
-	cash := models.CashWithdrawals(cashWithdrawals)
-	for employee, amount := range cash.Sum() {
-		fmt.Printf("%v: $%.2f\n", employee, amount)
-	}
+	fmt.Println(thirdPartyOrdersReport.Show())
+	//cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
+	//if err != nil {
+	//	panic(err)
+	//}
+	//
+	//cash := models.CashWithdrawals(cashWithdrawals)
+	//for employee, amount := range cash.Sum() {
+	//	fmt.Printf("%v: $%.2f\n", employee, amount)
+	//}
 
 	// export to csv
 	// todo: get rate from Sling
