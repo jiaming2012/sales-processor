@@ -92,3 +92,7 @@ type OrderDetail struct {
 	Duration      OrderDuration `csv:"Duration (Opened to Paid)"`
 	OrderSource   string        `csv:"Order Source"`
 }
+
+func (o OrderDetail) Show() string {
+	return fmt.Sprintf("%v - #%v - %v - $%.2f", o.OrderNumber, o.Opened.Format("15:04 pm"), o.TabNames, o.Amount-o.Tax)
+}

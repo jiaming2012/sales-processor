@@ -33,31 +33,23 @@ type SlingUserDTO struct {
 }
 
 type SlingUser struct {
-	ID                        int     `json:"id"`
-	Type                      string  `json:"type"`
-	FirstName                 string  `json:"name"`
-	LastName                  string  `json:"lastname"`
-	Email                     string  `json:"email"`
-	HoursCap                  int     `json:"hoursCap"`
-	Active                    bool    `json:"active"`
-	IsCommissionBasedEmployee bool    `json:"IsCommissionBasedEmployee"`
-	EmployeeID                int     `json:"employeeId"`
-	Rate                      float64 `json:"rate"`
+	ID                       int    `json:"id"`
+	Type                     string `json:"type"`
+	FirstName                string `json:"name"`
+	LastName                 string `json:"lastname"`
+	Email                    string `json:"email"`
+	HoursCap                 int    `json:"hoursCap"`
+	Active                   bool   `json:"active"`
+	CommissionSalesStructure *CommissionSalesStructure
+	EmployeeID               int     `json:"employeeId"`
+	Rate                     float64 `json:"rate"`
 }
 
 // ToSlingUser todo: write how to correct in case this happens
-func (dto *SlingUserDTO) ToSlingUser(commissionBasedEmployeesEmails []string) (*SlingUser, bool, error) {
+func (dto *SlingUserDTO) ToSlingUser(commissionBasedEmployees []CommissionBasedEmployee) (*SlingUser, bool, error) {
 	if !dto.Active {
 		log.Debugf("ignoring user %v because the user is not active", dto)
 		return nil, false, nil
-	}
-
-	isCommissionBasedEmployee := false
-	for _, email := range commissionBasedEmployeesEmails {
-		if dto.Email == email {
-			isCommissionBasedEmployee = true
-			break
-		}
 	}
 
 	if dto.EmployeeID == nil {
@@ -67,6 +59,14 @@ func (dto *SlingUserDTO) ToSlingUser(commissionBasedEmployeesEmails []string) (*
 	employeeID, err := strconv.Atoi(*dto.EmployeeID)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to parse employeeID: %w", err)
+	}
+
+	var commissionSalesStructure *CommissionSalesStructure
+	for _, commissionBasedEmployee := range commissionBasedEmployees {
+		if employeeID == commissionBasedEmployee.Id {
+			commissionSalesStructure = commissionBasedEmployee.CommissionSalesStructure
+			break
+		}
 	}
 
 	if len(dto.Wages.Base) != 1 {
@@ -79,16 +79,16 @@ func (dto *SlingUserDTO) ToSlingUser(commissionBasedEmployeesEmails []string) (*
 	}
 
 	return &SlingUser{
-		ID:                        dto.ID,
-		Type:                      dto.Type,
-		FirstName:                 dto.FirstName,
-		LastName:                  dto.LastName,
-		Email:                     dto.Email,
-		HoursCap:                  dto.HoursCap,
-		Active:                    dto.Active,
-		EmployeeID:                employeeID,
-		IsCommissionBasedEmployee: isCommissionBasedEmployee,
-		Rate:                      wage,
+		ID:                       dto.ID,
+		Type:                     dto.Type,
+		FirstName:                dto.FirstName,
+		LastName:                 dto.LastName,
+		Email:                    dto.Email,
+		HoursCap:                 dto.HoursCap,
+		Active:                   dto.Active,
+		EmployeeID:               employeeID,
+		CommissionSalesStructure: commissionSalesStructure,
+		Rate:                     wage,
 	}, true, nil
 }
 

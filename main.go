@@ -220,18 +220,50 @@ func fetchOrderDetails(date string) []*models.OrderDetail {
 	}
 	defer client.Close()
 
-	// Download remote file.
-	fName := fmt.Sprintf("/%s/%s/OrderDetails.csv", exportId, date)
-	file, err := client.Download(fName)
-	if err != nil {
-		log.Fatalln(fmt.Errorf("failed to download %v: %w", fName, err))
-	}
-	defer file.Close()
-
 	var orderDetails []*models.OrderDetail
 
-	if err = gocsv.Unmarshal(file, &orderDetails); err != nil {
-		log.Fatal(err)
+	for _, localFileName := range []string{"OrderDetails.csv", "AllItemsReport.csv", "AccountingReport.xls", "ItemSelectionDetails.csv", "ModifiersSelectionDetails.csv", "PaymentDetails.csv", "TimeEntries.csv"} {
+		// Download remote file.
+		remoteFileName := fmt.Sprintf("/%s/%s/%s", exportId, date, localFileName)
+		localFilePath := fmt.Sprintf("%s", date)
+
+		file, err := client.Download(remoteFileName)
+		if err != nil {
+			log.Fatal(fmt.Errorf("failed to download %v: %w", remoteFileName, err))
+		}
+
+		bytes, err := ioutil.ReadAll(file)
+		if err != nil {
+			file.Close()
+			log.Fatal(fmt.Errorf("failed to read bytes: %w", bytes))
+		}
+
+		// todo: save to database
+		err = os.MkdirAll(localFilePath, os.ModePerm)
+		if err != nil {
+			file.Close()
+			log.Fatal(err)
+		}
+
+		f, err := os.OpenFile(fmt.Sprintf("%s/%s", localFilePath, localFileName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			file.Close()
+			log.Fatal(err)
+		}
+
+		f.Write(bytes)
+
+		// process order details
+		if localFileName == "OrderDetails.csv" {
+			if err = gocsv.UnmarshalBytes(bytes, &orderDetails); err != nil {
+				f.Close()
+				file.Close()
+				log.Fatal(err)
+			}
+		}
+
+		f.Close()
+		file.Close()
 	}
 
 	return orderDetails
@@ -334,7 +366,6 @@ func CalcTipShare(durationWorked time.Duration) int {
 //4 - 6 -> 66%
 //2 - 4 -> 33%
 //<2 -> 0%
-
 func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours) models.WeeklySummary {
 	var tipDetails models.TipDetails
 	tipDetails.Details = make(map[models.Employee]float64)
@@ -402,6 +433,146 @@ type ThirdPartyOrdersReportItem struct {
 
 type ThirdPartyOrdersReport []ThirdPartyOrdersReportItem
 
+func IsOrderPaid(response string) (bool, error) {
+	responseLower := strings.ToLower(response)
+
+	if len(responseLower) == 1 {
+		if strings.Index(responseLower, "y") >= 0 {
+			return true, nil
+		}
+
+		if strings.Index(responseLower, "n") >= 0 {
+			return false, nil
+		}
+	} else if len(responseLower) == 2 {
+		if strings.Index(responseLower, "no") >= 0 {
+			return false, nil
+		}
+	} else if len(responseLower) == 3 {
+		if strings.Index(responseLower, "yes") >= 0 {
+			return true, nil
+		}
+	}
+
+	return false, fmt.Errorf("invalid user input: %s", responseLower)
+}
+
+func (r *ThirdPartyOrdersReport) GetOrders() models.OrderDetails {
+	var orderDetails []*models.OrderDetail
+
+	for _, report := range *r {
+		for _, o := range report.Orders.Uber {
+			orderDetails = append(orderDetails, o)
+		}
+
+		for _, o := range report.Orders.Grubhub {
+			orderDetails = append(orderDetails, o)
+		}
+
+		for _, o := range report.Orders.DoorDash {
+			orderDetails = append(orderDetails, o)
+		}
+	}
+
+	return orderDetails
+}
+
+func (r *ThirdPartyOrdersReport) GetUnpaidOrders() ThirdPartyOrdersReport {
+	o := make(ThirdPartyOrdersReport, 0)
+
+	for _, report := range *r {
+		var thirdPartyMerchantOrders models.ThirdPartyMerchantOrders
+
+		if len(report.Orders.Uber) > 0 {
+			fmt.Printf("Was the following Uber order(s) paid on %s? (y)es or (n)o\n", report.Date.Format("01/02"))
+		}
+
+		for _, orderDetail := range report.Orders.Uber {
+			fmt.Println(orderDetail.Show())
+
+			for {
+				// var then variable name then variable type
+				var response string
+
+				// Taking input from user
+				fmt.Scanln(&response)
+
+				isOrderPaid, err := IsOrderPaid(response)
+				if err != nil {
+					fmt.Println(err.Error())
+					continue
+				}
+
+				if !isOrderPaid {
+					thirdPartyMerchantOrders.Uber = append(thirdPartyMerchantOrders.Uber, orderDetail)
+				}
+
+				break
+			}
+		}
+
+		if len(report.Orders.DoorDash) > 0 {
+			fmt.Printf("Was the following DoorDash order(s) paid on %s? (y)es or (n)o\n", report.Date.Format("01/02"))
+		}
+
+		for _, orderDetail := range report.Orders.DoorDash {
+			fmt.Println(orderDetail.Show())
+
+			for {
+				// var then variable name then variable type
+				var response string
+
+				// Taking input from user
+				fmt.Scanln(&response)
+
+				isOrderPaid, err := IsOrderPaid(response)
+				if err != nil {
+					fmt.Println(err.Error())
+					continue
+				}
+
+				if !isOrderPaid {
+					thirdPartyMerchantOrders.Uber = append(thirdPartyMerchantOrders.Uber, orderDetail)
+				}
+
+				break
+			}
+		}
+
+		if len(report.Orders.Grubhub) > 0 {
+			fmt.Printf("Was the following Grubhub order(s) paid on %s? (y)es or (n)o\n", report.Date.Format("01/02"))
+		}
+
+		for _, orderDetail := range report.Orders.Grubhub {
+			fmt.Println(orderDetail.Show())
+
+			for {
+				// var then variable name then variable type
+				var response string
+
+				// Taking input from user
+				fmt.Scanln(&response)
+
+				isOrderPaid, err := IsOrderPaid(response)
+				if err != nil {
+					fmt.Println(err.Error())
+					continue
+				}
+
+				if !isOrderPaid {
+					thirdPartyMerchantOrders.Grubhub = append(thirdPartyMerchantOrders.Grubhub, orderDetail)
+				}
+
+				break
+			}
+		}
+
+		o.Add(report.Date, thirdPartyMerchantOrders)
+	}
+
+	return o
+}
+
 func (r *ThirdPartyOrdersReport) Add(date time.Time, orders models.ThirdPartyMerchantOrders) {
 	*r = append(*r, ThirdPartyOrdersReportItem{
 		Date:   date,
@@ -409,34 +580,50 @@ func (r *ThirdPartyOrdersReport) Add(date time.Time, orders models.ThirdPartyMer
 	})
 }
 
-func (r *ThirdPartyOrdersReport) Show() string {
+func (r *ThirdPartyOrdersReport) Show(title string) string {
 	report := strings.Builder{}
 
-	report.WriteString("\nThird Party Orders\n")
+	report.WriteString(fmt.Sprintf("\n%s\n", title))
 	report.WriteString("-----------------------\n")
 
 	for _, item := range *r {
-		report.WriteString(item.Date.String() + "\n")
+		report.WriteString(fmt.Sprintf("%v %v\n", item.Date.Weekday(), item.Date.Format("2006/01/02")))
+		report.WriteString("-----------------------\n")
+
+		ordersCount := 0
 
 		if len(item.Orders.Uber) > 0 {
 			report.WriteString("Uber Orders:\n")
 			for _, o := range item.Orders.Uber {
-				report.WriteString(fmt.Sprintf("%v - #%v - %v - $%.2f\n", o.Opened, o.OrderNumber, o.TabNames, o.Amount))
+				report.WriteString(o.Show())
+				report.WriteString("\n")
+				ordersCount += 1
 			}
+			report.WriteString("\n")
 		}
 
 		if len(item.Orders.Grubhub) > 0 {
 			report.WriteString("Grubhub Orders:\n")
 			for _, o := range item.Orders.Grubhub {
-				report.WriteString(fmt.Sprintf("%v - #%v - %v - $%.2f\n", o.Opened, o.OrderNumber, o.TabNames, o.Amount))
+				report.WriteString(o.Show())
+				report.WriteString("\n")
+				ordersCount += 1
 			}
+			report.WriteString("\n")
 		}
 
 		if len(item.Orders.DoorDash) > 0 {
 			report.WriteString("DoorDash Orders:\n")
 			for _, o := range item.Orders.DoorDash {
-				report.WriteString(fmt.Sprintf("%v - #%v - %v - $%.2f\n", o.Opened, o.OrderNumber, o.TabNames, o.Amount))
+				report.WriteString(o.Show())
+				report.WriteString("\n")
+				ordersCount += 1
 			}
+			report.WriteString("\n")
+		}
+
+		if ordersCount == 0 {
+			report.WriteString("no orders\n\n")
 		}
 	}
 
@@ -449,7 +636,42 @@ func main() {
 	baseURL := "https://api.getsling.com/v1"
 	slingEmail := "jamal@yumyums.kitchen"
 	slingPassword := "9@^P9bZR7RGu37zk"
-	commissionBasedEmployees := []string{"tanya@yumyums.kitchen", "jamal@yumyums.kitchen"}
+
+	commissionSalesStructureStandard := &models.CommissionSalesStructure{
+		models.CommissionSalesIsLessThan{
+			SalesThreshold:            2800,
+			SalesCommissionPercentage: 0.15,
+		},
+		models.CommissionSalesIsLessThan{
+			SalesThreshold:            3300,
+			SalesCommissionPercentage: 0.18,
+		},
+		models.CommissionSalesIsGreaterThanOrEqual{
+			SalesThreshold:            3300,
+			SalesCommissionPercentage: 0.20,
+		},
+	}
+
+	commissionSalesStructureOwner := &models.CommissionSalesStructure{
+		models.CommissionSalesIsGreaterThanOrEqual{
+			SalesThreshold:            0,
+			SalesCommissionPercentage: 0.0,
+		},
+	}
+
+	commissionBasedEmployees := []models.CommissionBasedEmployee{
+		{
+			Id:                       100,
+			Name:                     "Jamal Cole",
+			CommissionSalesStructure: commissionSalesStructureOwner,
+		},
+		{
+			Id:                       101,
+			Name:                     "Latanya Mcgriff",
+			CommissionSalesStructure: commissionSalesStructureStandard,
+		},
+	}
+	//commissionBasedEmployees := []string{"tanya@yumyums.kitchen", "jamal@yumyums.kitchen"}
 	//cashWithdrawalResponsesID := "1v3mSj-ZeKcDkplaAZBuva1dVOe7_Hf9O9z2o8YW_zfk"
 	exclusions := []models.TipExclusion{
 		{
@@ -513,7 +735,7 @@ func main() {
 
 	var employeeHours []models.EmployeeHours
 	for user, i := range timesheet {
-		if user.IsCommissionBasedEmployee {
+		if user.CommissionSalesStructure != nil {
 			log.Debugf("skip summing hours for commission based employee %v", user)
 			continue
 		}
@@ -532,6 +754,8 @@ func main() {
 	dailyReport := make(map[time.Time]models.DailySummary)
 
 	fmt.Printf("\n")
+
+	// Process orders
 	var thirdPartyOrdersReport ThirdPartyOrdersReport
 	for _, date := range dates {
 		fmt.Printf("%s: %s\n", date.Weekday(), date.Format("2006/01/02"))
@@ -553,6 +777,14 @@ func main() {
 		dailyReport[date] = summary
 	}
 
+	// Verify delivery orders
+	unpaidOrdersReport := thirdPartyOrdersReport.GetUnpaidOrders()
+	unpaidOrdersSummary := unpaidOrdersReport.GetOrders().GetSummary()
+
+	log.Infof("unpaidOrdersSummary.TotalSales %.2f", unpaidOrdersSummary.TotalSales)
+	log.Infof("unpaidOrdersSummary.TotalTaxes %.2f", unpaidOrdersSummary.TotalTaxes)
+	log.Infof("unpaidOrdersSummary.TotalTips %.2f", unpaidOrdersSummary.TotalTips)
+
 	//timesheetStub := external.TimesheetStub{}
 	//timesheet, err := timesheetStub.FetchTimesheet()
 	if err != nil {
@@ -565,14 +797,34 @@ func main() {
 	}
 
 	weeklySummary := CalculateWeeklyReport(dailyReport, ts, employeeHours)
+	weeklySummary.Sales -= unpaidOrdersSummary.TotalSales
 	fmt.Println(weeklySummary.Show())
 	fmt.Printf("\n")
 	fmt.Printf("\n")
 
+	for _, empl := range commissionBasedEmployees {
+		// todo: unify all employee models
+		tips := weeklySummary.Tips.Details[models.Employee(empl.Name)]
+
+		salesCommissionPercentage, err := empl.CommissionSalesStructure.GetSalesCommissionPercentage(weeklySummary.Sales)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(dates[0], dates[len(dates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage)
+		fmt.Println(commissionBasedEmployeesSummary.Show())
+		fmt.Printf("\n")
+		fmt.Printf("\n")
+	}
+
 	fmt.Println("Cash Held")
 	fmt.Println("-----------------------")
 
-	fmt.Println(thirdPartyOrdersReport.Show())
+	fmt.Println(thirdPartyOrdersReport.Show("All Delivery Orders"))
+	fmt.Printf("\n")
+	fmt.Println("-----------------------")
+	fmt.Printf("\n")
+	fmt.Println(unpaidOrdersReport.Show("Unpaid Delivery Orders"))
 	//cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
 	//if err != nil {
 	//	panic(err)

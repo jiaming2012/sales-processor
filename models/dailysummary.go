@@ -31,7 +31,7 @@ func (s DailySummary) Show() string {
 		if len(summary.MissedPayments) > 0 {
 			output.WriteString(fmt.Sprintf("%v had %v missed payment(s)\n", employee, len(summary.MissedPayments)))
 			for _, missedPayment := range summary.MissedPayments {
-				output.WriteString(fmt.Sprintf("Order #%v: $%.2f\n", missedPayment.OrderNumber, missedPayment.Amount))
+				output.WriteString(fmt.Sprintf("-> Order #%v: $%.2f\n", missedPayment.OrderNumber, missedPayment.Amount))
 			}
 		}
 	}

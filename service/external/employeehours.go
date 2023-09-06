@@ -133,7 +133,7 @@ func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (Sling
 		}
 
 		if !itemShift.IsApproved {
-			if user.IsCommissionBasedEmployee {
+			if user.CommissionSalesStructure != nil {
 				log.Debugf("surpressing error: commission based employee, %v, is allowed to have unapproved shift %v -> %v", user, itemShift.ClockIn, itemShift.ClockOut)
 			} else {
 				return nil, fmt.Errorf("unapproved shift found for %v from %v -> %v", user.Name(), itemShift.ClockIn, itemShift.ClockOut)
@@ -156,7 +156,7 @@ func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (Sling
 	return slingPayroll, nil
 }
 
-func (c *slingTimesheetClient) PopulateUsers(commissionBasedEmployeesEmails []string) error {
+func (c *slingTimesheetClient) PopulateUsers(commissionBasedEmployees []models.CommissionBasedEmployee) error {
 	usersURL := fmt.Sprintf("%s/users/concise", c.baseURL)
 
 	c.users = make(map[int]models.SlingUser)
@@ -181,7 +181,7 @@ func (c *slingTimesheetClient) PopulateUsers(commissionBasedEmployeesEmails []st
 	}
 
 	for _, dto := range slingDTO.Users {
-		user, found, dtoErr := dto.ToSlingUser(commissionBasedEmployeesEmails)
+		user, found, dtoErr := dto.ToSlingUser(commissionBasedEmployees)
 		if dtoErr != nil {
 			return fmt.Errorf("failed to convert dto: %w", dtoErr)
 		}
