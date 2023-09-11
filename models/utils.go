@@ -4,19 +4,19 @@ import (
 	"strings"
 )
 
-func IsDeliveryServiceName(payload string) (bool, string) {
+func IsDeliveryServiceName(payload string) (bool, ThirdPartyMerchant) {
 	lower := strings.ToLower(payload)
 	if strings.Index(lower, "grubhub") >= 0 {
-		return true, "Grubhub"
+		return true, GrubHub
 	} else if strings.Index(lower, "uber eats") >= 0 {
-		return true, "Uber Eats"
+		return true, UberEats
 	} else if strings.Index(lower, "doordash") >= 0 {
-		return true, "DoorDash"
+		return true, DoorDash
 	} else {
-		return false, ""
+		return false, UnknownMerchant
 	}
 }
 
-func IsDeliveryOrder(detail *OrderDetail) (bool, string) {
+func IsDeliveryOrder(detail *OrderDetail) (bool, ThirdPartyMerchant) {
 	return IsDeliveryServiceName(detail.DiningOptions)
 }

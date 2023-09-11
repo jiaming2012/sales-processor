@@ -37,7 +37,10 @@ func (orders OrderDetails) GetSummary() OrderSummary {
 		}
 
 		if o.Paid.IsZero() {
-			missed = append(missed, o)
+			if o.Total > 0 {
+				missed = append(missed, o)
+			}
+
 			continue
 		}
 

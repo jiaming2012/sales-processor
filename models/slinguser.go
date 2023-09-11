@@ -45,6 +45,10 @@ type SlingUser struct {
 	Rate                     float64 `json:"rate"`
 }
 
+func (u *SlingUser) Employee() Employee {
+	return Employee(fmt.Sprintf("%s %s", u.FirstName, u.LastName))
+}
+
 // ToSlingUser todo: write how to correct in case this happens
 func (dto *SlingUserDTO) ToSlingUser(commissionBasedEmployees []CommissionBasedEmployee) (*SlingUser, bool, error) {
 	if !dto.Active {

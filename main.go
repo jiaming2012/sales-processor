@@ -18,6 +18,7 @@ import (
 	"jiaming2012/sales-processor/sftp"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -290,29 +291,23 @@ func groupOrderDetailsByServer(orderDetails []*models.OrderDetail) map[models.Se
 }
 
 func getThirdPartyOrders(orderDetails []*models.OrderDetail) (models.ThirdPartyMerchantOrders, error) {
-	grubhubOrders := make(models.OrderDetails, 0)
-	uberOrders := make(models.OrderDetails, 0)
-	doordashOrders := make(models.OrderDetails, 0)
+	orders := make(models.ThirdPartyMerchantOrders)
 
 	for _, o := range orderDetails {
 		if found, company := models.IsDeliveryOrder(o); found {
 			switch company {
-			case "Grubhub":
-				grubhubOrders = append(grubhubOrders, o)
-			case "Uber Eats":
-				uberOrders = append(uberOrders, o)
-			case "DoorDash":
-				doordashOrders = append(doordashOrders, o)
+			case models.GrubHub:
+				orders.Add(models.GrubHub, o)
+			case models.UberEats:
+				orders.Add(models.UberEats, o)
+			case models.DoorDash:
+				orders.Add(models.DoorDash, o)
 			default:
 				return models.ThirdPartyMerchantOrders{}, fmt.Errorf("getThirdPartyOrders: unknown company %v", company)
 			}
 		}
 	}
-	return models.ThirdPartyMerchantOrders{
-		Grubhub:  grubhubOrders,
-		Uber:     uberOrders,
-		DoorDash: doordashOrders,
-	}, nil
+	return orders, nil
 }
 
 func ProcessOrderDetails(orderDetails []*models.OrderDetail) (models.DailySummary, error) {
@@ -426,12 +421,28 @@ func setup(ctx context.Context) (*googlesheets.Service, error) {
 	return sheetsSrv, nil
 }
 
-type ThirdPartyOrdersReportItem struct {
-	Date   time.Time
-	Orders models.ThirdPartyMerchantOrders
+//type ThirdPartyOrdersReportItem
+
+//func (it *ThirdPartyOrdersReportItem) Add(date time.Time, merchantOrders models.ThirdPartyMerchantOrders) {
+//	orders := (*it)[date]
+//	orders.AddThirdPartyMerchantOrders(merchantOrders)
+//}
+
+func (r *ThirdPartyOrdersReport) GetOrders() models.OrderDetails {
+	var orderDetails []*models.OrderDetail
+
+	for _, thirdPartyReportItem := range *r {
+		for _, thirdPartyMerchantOrders := range thirdPartyReportItem {
+			for _, o := range thirdPartyMerchantOrders {
+				orderDetails = append(orderDetails, o)
+			}
+		}
+	}
+
+	return orderDetails
 }
 
-type ThirdPartyOrdersReport []ThirdPartyOrdersReportItem
+type ThirdPartyOrdersReport map[time.Time]models.ThirdPartyMerchantOrders
 
 func IsOrderPaid(response string) (bool, error) {
 	responseLower := strings.ToLower(response)
@@ -457,127 +468,67 @@ func IsOrderPaid(response string) (bool, error) {
 	return false, fmt.Errorf("invalid user input: %s", responseLower)
 }
 
-func (r *ThirdPartyOrdersReport) GetOrders() models.OrderDetails {
-	var orderDetails []*models.OrderDetail
-
-	for _, report := range *r {
-		for _, o := range report.Orders.Uber {
-			orderDetails = append(orderDetails, o)
-		}
-
-		for _, o := range report.Orders.Grubhub {
-			orderDetails = append(orderDetails, o)
-		}
-
-		for _, o := range report.Orders.DoorDash {
-			orderDetails = append(orderDetails, o)
-		}
-	}
-
-	return orderDetails
-}
-
 func (r *ThirdPartyOrdersReport) GetUnpaidOrders() ThirdPartyOrdersReport {
 	o := make(ThirdPartyOrdersReport, 0)
+	for _, thirdPartyMerchant := range []models.ThirdPartyMerchant{models.UberEats, models.GrubHub, models.DoorDash} {
+		for date, merchantOrders := range *r {
+			thirdPartyMerchantOrders := make(models.ThirdPartyMerchantOrders)
 
-	for _, report := range *r {
-		var thirdPartyMerchantOrders models.ThirdPartyMerchantOrders
-
-		if len(report.Orders.Uber) > 0 {
-			fmt.Printf("Was the following Uber order(s) paid on %s? (y)es or (n)o\n", report.Date.Format("01/02"))
-		}
-
-		for _, orderDetail := range report.Orders.Uber {
-			fmt.Println(orderDetail.Show())
-
-			for {
-				// var then variable name then variable type
-				var response string
-
-				// Taking input from user
-				fmt.Scanln(&response)
-
-				isOrderPaid, err := IsOrderPaid(response)
-				if err != nil {
-					fmt.Println(err.Error())
-					continue
-				}
-
-				if !isOrderPaid {
-					thirdPartyMerchantOrders.Uber = append(thirdPartyMerchantOrders.Uber, orderDetail)
-				}
-
-				break
+			if len(merchantOrders[thirdPartyMerchant]) > 0 {
+				fmt.Printf("Was the following %v order(s) paid on %s? (y)es or (n)o\n", thirdPartyMerchant, date.Format("01/02"))
 			}
-		}
 
-		if len(report.Orders.DoorDash) > 0 {
-			fmt.Printf("Was the following DoorDash order(s) paid on %s? (y)es or (n)o\n", report.Date.Format("01/02"))
-		}
+			for _, orderDetail := range merchantOrders[thirdPartyMerchant] {
+				fmt.Println(orderDetail.Show())
 
-		for _, orderDetail := range report.Orders.DoorDash {
-			fmt.Println(orderDetail.Show())
+				for {
+					// var then variable name then variable type
+					var response string
 
-			for {
-				// var then variable name then variable type
-				var response string
+					// Taking input from user
+					fmt.Scanln(&response)
 
-				// Taking input from user
-				fmt.Scanln(&response)
+					isOrderPaid, err := IsOrderPaid(response)
+					if err != nil {
+						fmt.Println(err.Error())
+						continue
+					}
 
-				isOrderPaid, err := IsOrderPaid(response)
-				if err != nil {
-					fmt.Println(err.Error())
-					continue
+					if !isOrderPaid {
+						thirdPartyMerchantOrders.Add(thirdPartyMerchant, orderDetail)
+					}
+
+					break
 				}
-
-				if !isOrderPaid {
-					thirdPartyMerchantOrders.Uber = append(thirdPartyMerchantOrders.Uber, orderDetail)
-				}
-
-				break
 			}
+
+			o.Add(date, thirdPartyMerchantOrders)
 		}
-
-		if len(report.Orders.Grubhub) > 0 {
-			fmt.Printf("Was the following Grubhub order(s) paid on %s? (y)es or (n)o\n", report.Date.Format("01/02"))
-		}
-
-		for _, orderDetail := range report.Orders.Grubhub {
-			fmt.Println(orderDetail.Show())
-
-			for {
-				// var then variable name then variable type
-				var response string
-
-				// Taking input from user
-				fmt.Scanln(&response)
-
-				isOrderPaid, err := IsOrderPaid(response)
-				if err != nil {
-					fmt.Println(err.Error())
-					continue
-				}
-
-				if !isOrderPaid {
-					thirdPartyMerchantOrders.Grubhub = append(thirdPartyMerchantOrders.Grubhub, orderDetail)
-				}
-
-				break
-			}
-		}
-
-		o.Add(report.Date, thirdPartyMerchantOrders)
 	}
 
 	return o
 }
 
 func (r *ThirdPartyOrdersReport) Add(date time.Time, orders models.ThirdPartyMerchantOrders) {
-	*r = append(*r, ThirdPartyOrdersReportItem{
-		Date:   date,
-		Orders: orders,
+	if data, found := (*r)[date]; found {
+		data.AddThirdPartyMerchantOrders(orders)
+	} else {
+		(*r)[date] = orders
+	}
+}
+
+func (r *ThirdPartyOrdersReport) GetOrderedDates() []time.Time {
+	var sortedDates []time.Time
+
+	for date, _ := range *r {
+		sortedDates = append(sortedDates, date)
+	}
+
+	sort.Slice(sortedDates, func(i, j int) bool {
+		return sortedDates[i].Before(sortedDates[j])
 	})
+
+	return sortedDates
 }
 
 func (r *ThirdPartyOrdersReport) Show(title string) string {
@@ -586,15 +537,17 @@ func (r *ThirdPartyOrdersReport) Show(title string) string {
 	report.WriteString(fmt.Sprintf("\n%s\n", title))
 	report.WriteString("-----------------------\n")
 
-	for _, item := range *r {
-		report.WriteString(fmt.Sprintf("%v %v\n", item.Date.Weekday(), item.Date.Format("2006/01/02")))
+	for _, date := range r.GetOrderedDates() {
+		orders := (*r)[date]
+
+		report.WriteString(fmt.Sprintf("%v %v\n", date.Weekday(), date.Format("2006/01/02")))
 		report.WriteString("-----------------------\n")
 
 		ordersCount := 0
 
-		if len(item.Orders.Uber) > 0 {
+		if len(orders[models.UberEats]) > 0 {
 			report.WriteString("Uber Orders:\n")
-			for _, o := range item.Orders.Uber {
+			for _, o := range orders[models.UberEats] {
 				report.WriteString(o.Show())
 				report.WriteString("\n")
 				ordersCount += 1
@@ -602,9 +555,9 @@ func (r *ThirdPartyOrdersReport) Show(title string) string {
 			report.WriteString("\n")
 		}
 
-		if len(item.Orders.Grubhub) > 0 {
+		if len(orders[models.GrubHub]) > 0 {
 			report.WriteString("Grubhub Orders:\n")
-			for _, o := range item.Orders.Grubhub {
+			for _, o := range orders[models.GrubHub] {
 				report.WriteString(o.Show())
 				report.WriteString("\n")
 				ordersCount += 1
@@ -612,9 +565,9 @@ func (r *ThirdPartyOrdersReport) Show(title string) string {
 			report.WriteString("\n")
 		}
 
-		if len(item.Orders.DoorDash) > 0 {
+		if len(orders[models.DoorDash]) > 0 {
 			report.WriteString("DoorDash Orders:\n")
-			for _, o := range item.Orders.DoorDash {
+			for _, o := range orders[models.DoorDash] {
 				report.WriteString(o.Show())
 				report.WriteString("\n")
 				ordersCount += 1
@@ -756,7 +709,7 @@ func main() {
 	fmt.Printf("\n")
 
 	// Process orders
-	var thirdPartyOrdersReport ThirdPartyOrdersReport
+	thirdPartyOrdersReport := make(ThirdPartyOrdersReport)
 	for _, date := range dates {
 		fmt.Printf("%s: %s\n", date.Weekday(), date.Format("2006/01/02"))
 		fmt.Printf("-----------------------\n")
@@ -802,6 +755,9 @@ func main() {
 	fmt.Printf("\n")
 	fmt.Printf("\n")
 
+	fmt.Printf("Sales Commission Breakdown\n")
+	fmt.Printf("-----------------------\n")
+	fmt.Printf("\n")
 	for _, empl := range commissionBasedEmployees {
 		// todo: unify all employee models
 		tips := weeklySummary.Tips.Details[models.Employee(empl.Name)]
