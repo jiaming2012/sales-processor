@@ -27,6 +27,7 @@ func (s *WeeklySummary) Show() string {
 		tips := s.Tips.Details[employeeHours.Employee.Employee()]
 		totalComp := wage + tips
 		wageOutput.WriteString(fmt.Sprintf("%v: %.2f hours @ $%.2f/hr = $%.2f + $%.2f tips = $%.2f total compensation\n", employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, totalComp))
+		wageOutput.WriteString("\n")
 		wages += wage
 	}
 
@@ -43,6 +44,7 @@ func (s *WeeklySummary) Show() string {
 	output.WriteString("-----------------------\n")
 	for employee, amount := range s.Tips.Details {
 		output.WriteString(fmt.Sprintf("%s: $%.2f\n", employee, amount))
+		output.WriteString("\n")
 	}
 	output.WriteString("\n")
 	output.WriteString("\n")

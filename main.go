@@ -540,8 +540,10 @@ func (r *ThirdPartyOrdersReport) Show(title string) string {
 	for _, date := range r.GetOrderedDates() {
 		orders := (*r)[date]
 
-		report.WriteString(fmt.Sprintf("%v %v\n", date.Weekday(), date.Format("2006/01/02")))
-		report.WriteString("-----------------------\n")
+		if len(orders[models.UberEats]) > 0 || len(orders[models.GrubHub]) > 0 || len(orders[models.DoorDash]) > 0 {
+			report.WriteString(fmt.Sprintf("%v %v\n", date.Weekday(), date.Format("2006/01/02")))
+			report.WriteString("-----------------------\n")
+		}
 
 		ordersCount := 0
 
@@ -573,10 +575,6 @@ func (r *ThirdPartyOrdersReport) Show(title string) string {
 				ordersCount += 1
 			}
 			report.WriteString("\n")
-		}
-
-		if ordersCount == 0 {
-			report.WriteString("no orders\n\n")
 		}
 	}
 
@@ -776,11 +774,11 @@ func main() {
 	fmt.Println("Cash Held")
 	fmt.Println("-----------------------")
 
-	fmt.Println(thirdPartyOrdersReport.Show("All Delivery Orders"))
+	fmt.Println(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
 	fmt.Printf("\n")
 	fmt.Println("-----------------------")
 	fmt.Printf("\n")
-	fmt.Println(unpaidOrdersReport.Show("Unpaid Delivery Orders"))
+	fmt.Println(unpaidOrdersReport.Show("Cancelled Delivery Orders"))
 	//cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
 	//if err != nil {
 	//	panic(err)
@@ -824,7 +822,7 @@ func main() {
 		panic(err)
 	}
 
-	if err := payroll.Entries(entries).ToCSV(f); err != nil {
+	if err = payroll.Entries(entries).ToCSV(f); err != nil {
 		panic(err)
 	}
 
