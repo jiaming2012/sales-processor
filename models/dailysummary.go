@@ -13,12 +13,12 @@ type DailySummary struct {
 	ThirdPartyOrders ThirdPartyMerchantOrders
 }
 
-func (s DailySummary) Show() string {
+func (s DailySummary) Show(tipsWithheldPercentage float64) string {
 	output := strings.Builder{}
 	deliveryOutput := strings.Builder{}
 
 	for employee, details := range s.EmployeeDetails {
-		summary := OrderDetails(details).GetSummary()
+		summary := OrderDetails(details).GetSummary(tipsWithheldPercentage)
 
 		if found, company := IsDeliveryServiceName(string(employee)); found {
 			deliveryOutput.WriteString(fmt.Sprintf("-> %v: $%.2f\n", company, summary.TotalSales))

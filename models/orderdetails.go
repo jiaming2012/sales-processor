@@ -24,7 +24,7 @@ func calculateAverageDuration(durations []time.Duration) time.Duration {
 	return averageDuration
 }
 
-func (orders OrderDetails) GetSummary() OrderSummary {
+func (orders OrderDetails) GetSummary(tipsWithheldPercentage float64) OrderSummary {
 	var amount, taxes, tips float64 = 0, 0, 0
 	var voids = 0
 	missed := make([]*OrderDetail, 0)
@@ -46,7 +46,7 @@ func (orders OrderDetails) GetSummary() OrderSummary {
 
 		amount += o.Amount
 		taxes += o.Tax
-		tips += o.Tip
+		tips += o.Tip * (1 - tipsWithheldPercentage)
 		durations = append(durations, o.Duration.Duration)
 	}
 

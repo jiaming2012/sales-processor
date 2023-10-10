@@ -310,7 +310,7 @@ func getThirdPartyOrders(orderDetails []*models.OrderDetail) (models.ThirdPartyM
 	return orders, nil
 }
 
-func ProcessOrderDetails(orderDetails []*models.OrderDetail) (models.DailySummary, error) {
+func ProcessOrderDetails(orderDetails []*models.OrderDetail, tipsWithheldPercentage float64) (models.DailySummary, error) {
 	serverDetails := groupOrderDetailsByServer(orderDetails)
 	thirdPartyOrders, err := getThirdPartyOrders(orderDetails)
 	if err != nil {
@@ -320,7 +320,7 @@ func ProcessOrderDetails(orderDetails []*models.OrderDetail) (models.DailySummar
 	var netSales, totalTaxes, totalTips float64
 	employeeDetails := make(map[models.Employee][]*models.OrderDetail)
 	for server, details := range serverDetails {
-		summary := models.OrderDetails(details).GetSummary()
+		summary := models.OrderDetails(details).GetSummary(tipsWithheldPercentage)
 
 		netSales += summary.TotalSales
 		totalTips += summary.TotalTips
@@ -587,6 +587,7 @@ func main() {
 	baseURL := "https://api.getsling.com/v1"
 	slingEmail := "jamal@yumyums.kitchen"
 	slingPassword := "9@^P9bZR7RGu37zk"
+	tipsWithheldPercentage := 0.03
 
 	commissionSalesStructureStandard := &models.CommissionSalesStructure{
 		models.CommissionSalesIsLessThan{
@@ -712,12 +713,12 @@ func main() {
 		fmt.Printf("%s: %s\n", date.Weekday(), date.Format("2006/01/02"))
 		fmt.Printf("-----------------------\n")
 		orderDetails := fetchOrderDetails(date.Format("20060102"))
-		summary, err := ProcessOrderDetails(orderDetails)
+		summary, err := ProcessOrderDetails(orderDetails, tipsWithheldPercentage)
 		if err != nil {
 			panic(err)
 		}
 
-		fmt.Print(summary.Show())
+		fmt.Print(summary.Show(tipsWithheldPercentage))
 		fmt.Printf("\n")
 		fmt.Printf("\n")
 
@@ -730,7 +731,7 @@ func main() {
 
 	// Verify delivery orders
 	unpaidOrdersReport := thirdPartyOrdersReport.GetUnpaidOrders()
-	unpaidOrdersSummary := unpaidOrdersReport.GetOrders().GetSummary()
+	unpaidOrdersSummary := unpaidOrdersReport.GetOrders().GetSummary(tipsWithheldPercentage)
 
 	log.Infof("unpaidOrdersSummary.TotalSales %.2f", unpaidOrdersSummary.TotalSales)
 	log.Infof("unpaidOrdersSummary.TotalTaxes %.2f", unpaidOrdersSummary.TotalTaxes)
