@@ -70,6 +70,16 @@ type commissionBasedEmployeesTopLineSummary struct {
 	NetSales                  float64
 	Tips                      float64
 	SalesCommissionPercentage float64
+	CashHeld                  []float64
+	Taxes                     float64
+}
+
+func (s commissionBasedEmployeesTopLineSummary) GetCommission() float64 {
+	return s.NetSales * s.SalesCommissionPercentage
+}
+
+func (s commissionBasedEmployeesTopLineSummary) GetPretaxPay() float64 {
+	return s.GetCommission() + s.Tips
 }
 
 func (s commissionBasedEmployeesTopLineSummary) Show() string {
@@ -77,22 +87,55 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 
 	output.WriteString(fmt.Sprintf("PAY for %s %s - %s\n\n", s.Name, s.FromDate.Format("01/02"), s.ToDate.Format("01/02")))
 
-	commission := s.NetSales * s.SalesCommissionPercentage
+	commission := s.GetCommission()
 	output.WriteString(fmt.Sprintf("Sales: $%.2f * %.0f%% = $%.2f\n", s.NetSales, s.SalesCommissionPercentage*100, commission))
 	output.WriteString(fmt.Sprintf("Tips: $%.2f\n", s.Tips))
 
-	output.WriteString(fmt.Sprintf("Pretax Pay: $%.2f", commission+s.Tips))
+	preTaxPay := commission + s.Tips
+	output.WriteString(fmt.Sprintf("\nPretax Pay: $%.2f\n", preTaxPay))
+	output.WriteString(fmt.Sprintf("Taxes: -$%.2f\n", s.Taxes))
+	output.WriteString(fmt.Sprintf("Net Pay: $%.2f\n", preTaxPay-s.Taxes))
+
+	output.WriteString("\nCash:\n")
+
+	totalCashHeld := 0.0
+
+	if len(s.CashHeld) == 0 {
+		output.WriteString("No cash taken\n")
+	} else {
+		for _, cash := range s.CashHeld {
+			output.WriteString(fmt.Sprintf("  -$%.2f\n", cash))
+			totalCashHeld += cash
+		}
+	}
+
+	output.WriteString(fmt.Sprintf("\nDeposit: -$%.2f\n", commission+s.Tips-s.Taxes-totalCashHeld))
 
 	return output.String()
 }
 
-func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.Time, name string, netSales float64, tips float64, salesCommissionPercentage float64) *commissionBasedEmployeesTopLineSummary {
-	return &commissionBasedEmployeesTopLineSummary{
+func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.Time, name string, netSales float64, tips float64, salesCommissionPercentage float64, cashHeld []float64) *commissionBasedEmployeesTopLineSummary {
+	s := &commissionBasedEmployeesTopLineSummary{
 		FromDate:                  fromDate,
 		ToDate:                    toDate,
 		Name:                      name,
 		NetSales:                  netSales,
 		Tips:                      tips,
+		CashHeld:                  cashHeld,
 		SalesCommissionPercentage: salesCommissionPercentage,
 	}
+
+	var taxes float64
+	fmt.Printf("Enter taxes for %s with pretax pay $%.2f: \n", name, s.GetPretaxPay())
+	if _, err := fmt.Scanln(&taxes); err != nil {
+		panic(err)
+	}
+
+	if taxes < 0 {
+		panic("taxes must be positive")
+	}
+
+	s.Taxes = taxes
+
+	return s
 }

@@ -1,4 +1,4 @@
-sales/
+output/
 creds/
 .DS_Store
 *.csv

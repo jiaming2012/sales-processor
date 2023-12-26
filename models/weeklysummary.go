@@ -11,10 +11,11 @@ type TipDetails struct {
 }
 
 type WeeklySummary struct {
-	Sales float64
-	Taxes float64
-	Tips  TipDetails
-	Hours []EmployeeHours
+	Sales            float64
+	SalesTax         float64
+	Tips             TipDetails
+	Hours            []EmployeeHours
+	CashEmployeesPay []CashEmployeePay
 }
 
 func (s *WeeklySummary) Show() string {
@@ -31,12 +32,19 @@ func (s *WeeklySummary) Show() string {
 		wages += wage
 	}
 
+	for _, cashEmployee := range s.CashEmployeesPay {
+		totalComp := cashEmployee.NetPay + cashEmployee.Taxes
+		wageOutput.WriteString(fmt.Sprintf("%v: $%.2f pay + $%.2f taxes = $%.2f total compensation\n", cashEmployee.Name, cashEmployee.NetPay, cashEmployee.Taxes, totalComp))
+		wageOutput.WriteString("\n")
+		wages += totalComp
+	}
+
 	output.WriteString("Summary\n")
 	output.WriteString("-----------------------\n")
 	output.WriteString(fmt.Sprintf("Net Sales: $%.2f\n", s.Sales))
 	output.WriteString(fmt.Sprintf("Wages as a Percentage of Sales: %%%.0f\n", (wages/s.Sales)*100.0))
 	output.WriteString(fmt.Sprintf("Tips: $%.2f\n", s.Tips.Total))
-	output.WriteString(fmt.Sprintf("Sales Tax: $%.2f\n", s.Taxes))
+	output.WriteString(fmt.Sprintf("Sales Tax: $%.2f\n", s.SalesTax))
 	output.WriteString("\n")
 	output.WriteString("\n")
 
@@ -44,7 +52,6 @@ func (s *WeeklySummary) Show() string {
 	output.WriteString("-----------------------\n")
 	for employee, amount := range s.Tips.Details {
 		output.WriteString(fmt.Sprintf("%s: $%.2f\n", employee, amount))
-		output.WriteString("\n")
 	}
 	output.WriteString("\n")
 	output.WriteString("\n")

@@ -5,23 +5,26 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"fmt"
-	"github.com/gocarina/gocsv"
-	log "github.com/sirupsen/logrus"
-	"google.golang.org/api/option"
-	googlesheets "google.golang.org/api/sheets/v4"
 	"io/ioutil"
-	"jiaming2012/sales-processor/database"
-	"jiaming2012/sales-processor/models"
-	"jiaming2012/sales-processor/payroll"
-	"jiaming2012/sales-processor/service"
-	"jiaming2012/sales-processor/service/external"
-	"jiaming2012/sales-processor/sftp"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-pdf/fpdf"
+	"github.com/gocarina/gocsv"
+	log "github.com/sirupsen/logrus"
+	"google.golang.org/api/option"
+	googlesheets "google.golang.org/api/sheets/v4"
+
+	"jiaming2012/sales-processor/database"
+	"jiaming2012/sales-processor/models"
+	"jiaming2012/sales-processor/payroll"
+	"jiaming2012/sales-processor/service"
+	"jiaming2012/sales-processor/service/external"
+	"jiaming2012/sales-processor/sftp"
 )
 
 const (
@@ -226,7 +229,7 @@ func fetchOrderDetails(date string) []*models.OrderDetail {
 	for _, localFileName := range []string{"OrderDetails.csv", "AllItemsReport.csv", "AccountingReport.xls", "ItemSelectionDetails.csv", "ModifiersSelectionDetails.csv", "PaymentDetails.csv", "TimeEntries.csv"} {
 		// Download remote file.
 		remoteFileName := fmt.Sprintf("/%s/%s/%s", exportId, date, localFileName)
-		localFilePath := fmt.Sprintf("%s", date)
+		localFilePath := fmt.Sprintf("output/toast_reports/%s", date)
 
 		file, err := client.Download(remoteFileName)
 		if err != nil {
@@ -342,9 +345,9 @@ func ProcessOrderDetails(orderDetails []*models.OrderDetail, tipsWithheldPercent
 	}, nil
 }
 
-//type TipShare struct {
-//	Total
-//}
+//	type TipShare struct {
+//		Total
+//	}
 func CalcTipShare(durationWorked time.Duration) int {
 	if durationWorked.Hours() >= 6 {
 		return 3
@@ -357,11 +360,11 @@ func CalcTipShare(durationWorked time.Duration) int {
 	}
 }
 
-//6+ -> evenly
-//4 - 6 -> 66%
-//2 - 4 -> 33%
-//<2 -> 0%
-func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours) models.WeeklySummary {
+// 6+ -> evenly
+// 4 - 6 -> 66%
+// 2 - 4 -> 33%
+// <2 -> 0%
+func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours, cashEmployeesPay []models.CashEmployeePay) models.WeeklySummary {
 	var tipDetails models.TipDetails
 	tipDetails.Details = make(map[models.Employee]float64)
 	totalSales := 0.0
@@ -392,10 +395,11 @@ func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesh
 	}
 
 	return models.WeeklySummary{
-		Tips:  tipDetails,
-		Sales: totalSales,
-		Taxes: totalTaxes,
-		Hours: employeeHours,
+		Tips:             tipDetails,
+		Sales:            totalSales,
+		SalesTax:         totalTaxes,
+		Hours:            employeeHours,
+		CashEmployeesPay: cashEmployeesPay,
 	}
 }
 
@@ -581,25 +585,93 @@ func (r *ThirdPartyOrdersReport) Show(title string) string {
 	return report.String()
 }
 
-func main() {
-	// KEY_JSON_BASE64
+func getCashEmployeeWages(cashEmployees []models.CashEmployeeInputParam) []models.CashEmployeePay {
+	var cashEmployeesPay []models.CashEmployeePay
 
+	for _, employee := range cashEmployees {
+		// Ask the user to enter a withdrawal amount from stdin
+		fmt.Printf("Enter %s's net pay (or -1 to quit):\n", employee.Name)
+
+		var amount float64
+		if _, err := fmt.Scanln(&amount); err != nil {
+			panic(err)
+		}
+
+		if amount < 0 {
+			break
+		}
+
+		taxes := amount * employee.TaxRate
+
+		cashEmployeesPay = append(cashEmployeesPay, models.CashEmployeePay{
+			Name:   employee.Name,
+			NetPay: amount,
+			Taxes:  taxes,
+		})
+	}
+
+	fmt.Println("done ...")
+
+	return cashEmployeesPay
+}
+
+func getCashHeld() []float64 {
+	cashHeld := make([]float64, 0)
+
+	for {
+		// Ask the user to enter a withdrawal amount from stdin
+		fmt.Println("Enter a withdrawal amount (or 0 to quit):")
+
+		var amount int
+		if _, err := fmt.Scanln(&amount); err != nil {
+			panic(err)
+		}
+
+		if amount == 0 {
+			break
+		} else if amount < 0 {
+			fmt.Println("Please enter a positive amount.")
+			continue
+		}
+
+		cashHeld = append(cashHeld, float64(amount))
+	}
+
+	return cashHeld
+}
+
+func promptTransfers(salesTax float64) {
+	salesTaxPrompt := fmt.Sprintf("Transfer $%.2f to sales tax account ... (press any key to continue)", salesTax)
+	fmt.Println(salesTaxPrompt)
+	fmt.Scanln()
+
+	// todo: prompt for other transfers -- includes cash held
+}
+
+func main() {
+	//--- Variables ---
 	baseURL := "https://api.getsling.com/v1"
 	slingEmail := "jamal@yumyums.kitchen"
 	slingPassword := "9@^P9bZR7RGu37zk"
 	tipsWithheldPercentage := 0.03
+	cashEmployees := []models.CashEmployeeInputParam{
+		{
+			Name:    "Aly",
+			TaxRate: 0.22,
+		},
+	}
 
 	commissionSalesStructureStandard := &models.CommissionSalesStructure{
 		models.CommissionSalesIsLessThan{
-			SalesThreshold:            2800,
+			SalesThreshold:            2300,
 			SalesCommissionPercentage: 0.15,
 		},
 		models.CommissionSalesIsLessThan{
-			SalesThreshold:            3300,
+			SalesThreshold:            3000,
 			SalesCommissionPercentage: 0.18,
 		},
 		models.CommissionSalesIsGreaterThanOrEqual{
-			SalesThreshold:            3300,
+			SalesThreshold:            3000,
 			SalesCommissionPercentage: 0.20,
 		},
 	}
@@ -623,7 +695,7 @@ func main() {
 			CommissionSalesStructure: commissionSalesStructureStandard,
 		},
 	}
-	//commissionBasedEmployees := []string{"tanya@yumyums.kitchen", "jamal@yumyums.kitchen"}
+
 	//cashWithdrawalResponsesID := "1v3mSj-ZeKcDkplaAZBuva1dVOe7_Hf9O9z2o8YW_zfk"
 	exclusions := []models.TipExclusion{
 		{
@@ -648,11 +720,8 @@ func main() {
 		},
 	}
 
-	//ctx := context.Background()
-
 	// fetch dates in reporting period
 	// todo: we should dump these into a database the next day. Toast only keeps the last 7 days
-	dates := service.GetDatesStartingFromPreviousMonday()
 
 	// setup google sheets
 	//sheetsSrv, err := setup(ctx)
@@ -661,13 +730,25 @@ func main() {
 	//}
 	//
 	//sheetsClients := sheets.NewClient(sheetsSrv)
-	//
+
 	//// fetch cash with held
 	//rows, err := sheetsClients.FetchRows(ctx, cashWithdrawalResponsesID, "Withdrawals", sheetsSpreadsheetAllCells)
 	//if err != nil {
 	//	panic(err)
 	//}
 
+	//--- Cash Held ---
+	cashHeld := getCashHeld()
+
+	//--- Get Cash Employee Wages ---
+	cashEmployeeWages := getCashEmployeeWages(cashEmployees)
+
+	//--- Report Headers ---
+	dates := service.GetDatesStartingFromPreviousMonday()
+	fromDate := dates[0].Format("2006-01-02")
+	toDate := dates[len(dates)-1].Format("2006-01-02")
+
+	//--- Fetch Timesheets
 	slingClient, err := external.NewSlingTimesheet(baseURL, slingEmail, slingPassword)
 	if err != nil {
 		panic(err)
@@ -677,14 +758,12 @@ func main() {
 		panic(err)
 	}
 
-	fromDate := dates[0].Format("2006-01-02")
-	toDate := dates[len(dates)-1].Format("2006-01-02")
-
 	timesheet, err := slingClient.GetPayroll(fromDate, toDate)
 	if err != nil {
 		panic(err)
 	}
 
+	//--- Process Timesheets ---
 	var employeeHours []models.EmployeeHours
 	for user, i := range timesheet {
 		if user.CommissionSalesStructure != nil {
@@ -705,31 +784,28 @@ func main() {
 
 	dailyReport := make(map[time.Time]models.DailySummary)
 
-	fmt.Printf("\n")
+	var reportOutput strings.Builder
 
-	// Process orders
+	//--- Process Third Party Delivery Orders
 	thirdPartyOrdersReport := make(ThirdPartyOrdersReport)
 	for _, date := range dates {
-		fmt.Printf("%s: %s\n", date.Weekday(), date.Format("2006/01/02"))
-		fmt.Printf("-----------------------\n")
+		reportOutput.WriteString(fmt.Sprintf("%s - %s\n", date.Format("2006/01/02"), date.Weekday()))
+
 		orderDetails := fetchOrderDetails(date.Format("20060102"))
 		summary, err := ProcessOrderDetails(orderDetails, tipsWithheldPercentage)
 		if err != nil {
 			panic(err)
 		}
 
-		fmt.Print(summary.Show(tipsWithheldPercentage))
-		fmt.Printf("\n")
-		fmt.Printf("\n")
+		reportOutput.WriteString(summary.Show(tipsWithheldPercentage))
+		reportOutput.WriteString("\n")
 
 		thirdPartyOrdersReport.Add(date, summary.ThirdPartyOrders)
 
-		//fmt.Printf("sales tax: $%.2f\n", summary.Taxes)
-		//fmt.Printf("total tips: $%.2f\n (C.C. Fee = $%.2f)\n", summary.Tips*0.97, summary.Tips*0.03)
 		dailyReport[date] = summary
 	}
 
-	// Verify delivery orders
+	//--- Verify Delivery Orders
 	unpaidOrdersReport := thirdPartyOrdersReport.GetUnpaidOrders()
 	unpaidOrdersSummary := unpaidOrdersReport.GetOrders().GetSummary(tipsWithheldPercentage)
 
@@ -737,28 +813,30 @@ func main() {
 	log.Infof("unpaidOrdersSummary.TotalTaxes %.2f", unpaidOrdersSummary.TotalTaxes)
 	log.Infof("unpaidOrdersSummary.TotalTips %.2f", unpaidOrdersSummary.TotalTips)
 
-	//timesheetStub := external.TimesheetStub{}
-	//timesheet, err := timesheetStub.FetchTimesheet()
-	if err != nil {
-		panic(err)
-	}
-
+	//--- Fetch Timesheets ---
 	ts, err := timesheet.FetchTimesheet(exclusions)
 	if err != nil {
 		panic(err)
 	}
 
-	weeklySummary := CalculateWeeklyReport(dailyReport, ts, employeeHours)
-	weeklySummary.Sales -= unpaidOrdersSummary.TotalSales
-	fmt.Println(weeklySummary.Show())
-	fmt.Printf("\n")
-	fmt.Printf("\n")
+	weeklySummary := CalculateWeeklyReport(dailyReport, ts, employeeHours, cashEmployeeWages)
 
-	fmt.Printf("Sales Commission Breakdown\n")
-	fmt.Printf("-----------------------\n")
-	fmt.Printf("\n")
+	//--- todo: wait for manual input
+
+	weeklySummary.Sales -= unpaidOrdersSummary.TotalSales
+	reportOutput.WriteString(weeklySummary.Show())
+	reportOutput.WriteString("\n")
+
+	//--- Sales Commission Breakdown ---
+	reportOutput.WriteString("Sales Commission Breakdown\n")
+	reportOutput.WriteString("-----------------------\n")
+	reportOutput.WriteString("\n")
 	for _, empl := range commissionBasedEmployees {
 		// todo: unify all employee models
+		if empl.Name == "Jamal Cole" {
+			continue
+		}
+
 		tips := weeklySummary.Tips.Details[models.Employee(empl.Name)]
 
 		salesCommissionPercentage, err := empl.CommissionSalesStructure.GetSalesCommissionPercentage(weeklySummary.Sales)
@@ -766,20 +844,17 @@ func main() {
 			log.Fatal(err)
 		}
 
-		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(dates[0], dates[len(dates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage)
-		fmt.Println(commissionBasedEmployeesSummary.Show())
-		fmt.Printf("\n")
-		fmt.Printf("\n")
+		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(dates[0], dates[len(dates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld)
+		reportOutput.WriteString(commissionBasedEmployeesSummary.Show())
+		reportOutput.WriteString("\n")
 	}
 
-	fmt.Println("Cash Held")
-	fmt.Println("-----------------------")
+	//--- Transfer to Payment Accounts
+	promptTransfers(weeklySummary.SalesTax)
 
-	fmt.Println(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
-	fmt.Printf("\n")
-	fmt.Println("-----------------------")
-	fmt.Printf("\n")
-	fmt.Println(unpaidOrdersReport.Show("Cancelled Delivery Orders"))
+	log.Info(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
+
+	log.Info(unpaidOrdersReport.Show("Cancelled Delivery Orders"))
 	//cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
 	//if err != nil {
 	//	panic(err)
@@ -790,8 +865,7 @@ func main() {
 	//	fmt.Printf("%v: $%.2f\n", employee, amount)
 	//}
 
-	// export to csv
-	// todo: get rate from Sling
+	//--- Export to CSV ---
 	var entries []payroll.Entry
 	for _, empl := range weeklySummary.Hours {
 		entries = append(entries, payroll.Entry{
@@ -818,7 +892,9 @@ func main() {
 		}
 	}
 
-	f, err := os.Create(fmt.Sprintf("payroll_%v.csv", toDate))
+	writePDF(reportOutput.String(), fromDate, toDate)
+
+	f, err := os.Create(fmt.Sprintf("output/payroll/payroll_%v.csv", toDate))
 	if err != nil {
 		panic(err)
 	}
@@ -826,10 +902,20 @@ func main() {
 	if err = payroll.Entries(entries).ToCSV(f); err != nil {
 		panic(err)
 	}
+}
 
-	//setupDB()
-	//iterateDirectory("sales/unprocessed")
-	//log.Info("Successfully ran sales processor")
+func writePDF(report string, fromDate string, toDate string) {
+	header := fmt.Sprintf("Sales Report for %s - %s\n\n", fromDate, toDate)
+
+	pdf := fpdf.New("P", "mm", "A4", "")
+	pdf.AddPage()
+	pdf.SetFont("Helvetica", "", 16)
+	pdf.MultiCell(0, 10, header, "", "", false)
+	pdf.MultiCell(0, 10, report, "", "", false)
+
+	if err := pdf.OutputFileAndClose(fmt.Sprintf("output/payroll/payroll_%v.pdf", toDate)); err != nil {
+		panic(err)
+	}
 }
 
 func readData(fileName string) ([]*models.Sale, error) {
