@@ -125,6 +125,7 @@ func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.T
 		SalesCommissionPercentage: salesCommissionPercentage,
 	}
 
+	// todo: taxes should be grabbed before summary is creted
 	var taxes float64
 	fmt.Printf("Enter taxes for %s with pretax pay $%.2f: \n", name, s.GetPretaxPay())
 	if _, err := fmt.Scanln(&taxes); err != nil {

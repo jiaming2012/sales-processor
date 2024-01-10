@@ -592,25 +592,25 @@ func getCashEmployeeWages(cashEmployees []models.CashEmployeeInputParam) []model
 		// Ask the user to enter a withdrawal amount from stdin
 		fmt.Printf("Enter %s's net pay (or -1 to quit):\n", employee.Name)
 
-		var amount float64
-		if _, err := fmt.Scanln(&amount); err != nil {
+		var metPay float64
+		if _, err := fmt.Scanln(&metPay); err != nil {
 			panic(err)
 		}
 
-		if amount < 0 {
+		if metPay < 0 {
 			break
 		}
 
-		taxes := amount * employee.TaxRate
+		taxes := metPay * employee.TaxRate
 
 		cashEmployeesPay = append(cashEmployeesPay, models.CashEmployeePay{
 			Name:   employee.Name,
-			NetPay: amount,
+			NetPay: metPay,
 			Taxes:  taxes,
 		})
 	}
 
-	fmt.Println("done ...")
+	fmt.Println("done getting cash employee wages")
 
 	return cashEmployeesPay
 }
@@ -640,8 +640,19 @@ func getCashHeld() []float64 {
 	return cashHeld
 }
 
+func promptDeferredTaxesTransfers(cashEmployeeWages []models.CashEmployeePay) {
+	payrollTaxes := 0.0
+	for _, employee := range cashEmployeeWages {
+		payrollTaxes += employee.Taxes
+	}
+
+	prompt := fmt.Sprintf("Transfer $%.2f to deferred taxes account ... (press enter to continue)", payrollTaxes)
+	fmt.Println(prompt)
+	fmt.Scanln()
+}
+
 func promptTransfers(salesTax float64) {
-	salesTaxPrompt := fmt.Sprintf("Transfer $%.2f to sales tax account ... (press any key to continue)", salesTax)
+	salesTaxPrompt := fmt.Sprintf("Transfer $%.2f to sales tax account ... (press enter to continue)", salesTax)
 	fmt.Println(salesTaxPrompt)
 	fmt.Scanln()
 
@@ -657,7 +668,7 @@ func main() {
 	cashEmployees := []models.CashEmployeeInputParam{
 		{
 			Name:    "Aly",
-			TaxRate: 0.22,
+			TaxRate: 0.22 + 0.0765, // 22% federal + 7.65% payroll
 		},
 	}
 
@@ -845,12 +856,27 @@ func main() {
 		}
 
 		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(dates[0], dates[len(dates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld)
+
+		// todo: make employee conversion less janky
+		if empl.Name == "Latanya Mcgriff" {
+			netPay := commissionBasedEmployeesSummary.GetPretaxPay()
+			employerTaxes := netPay * 0.0765
+			cashEmployeeWages = append(cashEmployeeWages, models.CashEmployeePay{
+				Name:   empl.Name,
+				NetPay: netPay,
+				Taxes:  commissionBasedEmployeesSummary.Taxes + employerTaxes,
+			})
+		}
+
 		reportOutput.WriteString(commissionBasedEmployeesSummary.Show())
 		reportOutput.WriteString("\n")
 	}
 
 	//--- Transfer to Payment Accounts
 	promptTransfers(weeklySummary.SalesTax)
+
+	//--- Transfer to Deferred Taxes Accounts
+	promptDeferredTaxesTransfers(cashEmployeeWages)
 
 	log.Info(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
 
