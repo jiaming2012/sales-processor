@@ -7,6 +7,8 @@ import (
 
 type DailySummary struct {
 	Sales            float64
+	CashTendered     float64
+	CCFees           float64
 	Taxes            float64
 	Tips             float64
 	EmployeeDetails  map[Employee][]*OrderDetail
@@ -37,6 +39,8 @@ func (s DailySummary) Show(tipsWithheldPercentage float64) string {
 	}
 
 	output.WriteString(fmt.Sprintf("Sales: $%.2f\n", s.Sales))
+	output.WriteString(fmt.Sprintf("Cash Tendered: $%.2f\n", s.CashTendered))
+	output.WriteString(fmt.Sprintf("Credit Card Fees: $%.2f\n", s.CCFees))
 	output.WriteString(deliveryOutput.String())
 
 	return output.String()

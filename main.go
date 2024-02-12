@@ -205,7 +205,7 @@ func run(filename string) error {
 	return nil
 }
 
-func fetchOrderDetails(date string) []*models.OrderDetail {
+func fetchToastCSVReports(date string) []*models.OrderDetail {
 	pk, err := ioutil.ReadFile("creds/id_rsa") // required only if private key authentication is to be used
 	if err != nil {
 		log.Fatalln(err)
@@ -225,6 +225,7 @@ func fetchOrderDetails(date string) []*models.OrderDetail {
 	defer client.Close()
 
 	var orderDetails []*models.OrderDetail
+	var paymentDetails []*models.PaymentDetail
 
 	for _, localFileName := range []string{"OrderDetails.csv", "AllItemsReport.csv", "AccountingReport.xls", "ItemSelectionDetails.csv", "ModifiersSelectionDetails.csv", "PaymentDetails.csv", "TimeEntries.csv"} {
 		// Download remote file.
@@ -263,6 +264,25 @@ func fetchOrderDetails(date string) []*models.OrderDetail {
 				f.Close()
 				file.Close()
 				log.Fatal(err)
+			}
+		}
+
+		// process payment details
+		if localFileName == "PaymentDetails.csv" {
+			if err = gocsv.UnmarshalBytes(bytes, &paymentDetails); err != nil {
+				f.Close()
+				file.Close()
+				log.Fatal(err)
+			}
+
+			// associate payment details with order details
+			for _, paymentDetail := range paymentDetails {
+				for _, orderDetail := range orderDetails {
+					if paymentDetail.OrderID == orderDetail.OrderID {
+						orderDetail.PaymentDetails = append(orderDetail.PaymentDetails, *paymentDetail)
+						break
+					}
+				}
 			}
 		}
 
@@ -320,13 +340,15 @@ func ProcessOrderDetails(orderDetails []*models.OrderDetail, tipsWithheldPercent
 		return models.DailySummary{}, fmt.Errorf("ProcessOrderDetails: failed to get third party orders: %w", err)
 	}
 
-	var netSales, totalTaxes, totalTips float64
+	var netSales, totalTaxes, totalTips, cashTendered, ccFees float64
 	employeeDetails := make(map[models.Employee][]*models.OrderDetail)
 	for server, details := range serverDetails {
 		summary := models.OrderDetails(details).GetSummary(tipsWithheldPercentage)
 
 		netSales += summary.TotalSales
 		totalTips += summary.TotalTips
+		cashTendered += summary.CashTendered
+		ccFees += summary.CCFees
 		employeeDetails[models.Employee(server)] = details
 
 		if server.IsDeliveryService() {
@@ -339,6 +361,8 @@ func ProcessOrderDetails(orderDetails []*models.OrderDetail, tipsWithheldPercent
 	return models.DailySummary{
 		Sales:            netSales,
 		Taxes:            totalTaxes,
+		CashTendered:     cashTendered,
+		CCFees:           ccFees,
 		Tips:             totalTips,
 		EmployeeDetails:  employeeDetails,
 		ThirdPartyOrders: thirdPartyOrders,
@@ -369,6 +393,8 @@ func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesh
 	tipDetails.Details = make(map[models.Employee]float64)
 	totalSales := 0.0
 	totalTaxes := 0.0
+	totalCashTendered := 0.0
+	totalCCFees := 0.0
 
 	for reportTime, summary := range dailyReport {
 		tipsShare := make(map[models.Employee]int)
@@ -391,6 +417,8 @@ func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesh
 
 		totalSales += summary.Sales
 		totalTaxes += summary.Taxes
+		totalCashTendered += summary.CashTendered
+		totalCCFees += summary.CCFees
 		tipDetails.Total += summary.Tips
 	}
 
@@ -398,6 +426,8 @@ func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesh
 		Tips:             tipDetails,
 		Sales:            totalSales,
 		SalesTax:         totalTaxes,
+		CashTendered:     totalCashTendered,
+		CCFees:           totalCCFees,
 		Hours:            employeeHours,
 		CashEmployeesPay: cashEmployeesPay,
 	}
@@ -585,7 +615,7 @@ func (r *ThirdPartyOrdersReport) Show(title string) string {
 	return report.String()
 }
 
-func getCashEmployeeWages(cashEmployees []models.CashEmployeeInputParam) []models.CashEmployeePay {
+func getCashEmployeeWages(cashEmployees []models.CashEmployeeInputParam, defaultEmployeeTaxRate float64) []models.CashEmployeePay {
 	var cashEmployeesPay []models.CashEmployeePay
 
 	for _, employee := range cashEmployees {
@@ -610,7 +640,34 @@ func getCashEmployeeWages(cashEmployees []models.CashEmployeeInputParam) []model
 		})
 	}
 
-	fmt.Println("done getting cash employee wages")
+	// Ask if any other cash employees were paid
+	for {
+		var answer string
+
+		fmt.Printf("Was any other cash employee paid? (y)es or (n)o\n")
+
+		fmt.Scanln(&answer)
+
+		if strings.ToLower(answer) == "n" {
+			break
+		}
+
+		var employeeName string
+		var netPay float64
+
+		fmt.Printf("Enter the employee's name:\n")
+		fmt.Scanln(&employeeName)
+		fmt.Printf("Enter %s's net pay:\n", employeeName)
+		fmt.Scanln(&netPay)
+
+		cashEmployeesPay = append(cashEmployeesPay, models.CashEmployeePay{
+			Name:   employeeName,
+			NetPay: netPay,
+			Taxes:  netPay * defaultEmployeeTaxRate,
+		})
+	}
+
+	fmt.Println("done getting cash employee wages ...")
 
 	return cashEmployeesPay
 }
@@ -668,9 +725,10 @@ func main() {
 	cashEmployees := []models.CashEmployeeInputParam{
 		{
 			Name:    "Aly",
-			TaxRate: 0.22 + 0.0765, // 22% federal + 7.65% payroll
+			TaxRate: 0.25 + 0.0765, // 22% federal + 7.65% payroll + 3% buffer
 		},
 	}
+	defaultEmployeeTaxRate := 0.25
 
 	commissionSalesStructureStandard := &models.CommissionSalesStructure{
 		models.CommissionSalesIsLessThan{
@@ -752,7 +810,7 @@ func main() {
 	cashHeld := getCashHeld()
 
 	//--- Get Cash Employee Wages ---
-	cashEmployeeWages := getCashEmployeeWages(cashEmployees)
+	cashEmployeeWages := getCashEmployeeWages(cashEmployees, defaultEmployeeTaxRate)
 
 	//--- Report Headers ---
 	dates := service.GetDatesStartingFromPreviousMonday()
@@ -803,7 +861,7 @@ func main() {
 		reportOutput.WriteString(fmt.Sprintf("%s - %s\n", date.Format("2006/01/02"), date.Weekday()))
 
 		//--- Fetch order details from toast
-		orderDetails := fetchOrderDetails(date.Format("20060102"))
+		orderDetails := fetchToastCSVReports(date.Format("20060102"))
 		summary, err := ProcessOrderDetails(orderDetails, tipsWithheldPercentage)
 		if err != nil {
 			panic(err)
@@ -856,7 +914,8 @@ func main() {
 			log.Fatal(err)
 		}
 
-		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(dates[0], dates[len(dates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld)
+		// todo: cash held should be broken down by employee
+		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(dates[0], dates[len(dates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld, weeklySummary.CashTendered)
 
 		// todo: make employee conversion less janky
 		if empl.Name == "Latanya Mcgriff" {

@@ -72,25 +72,46 @@ func (duration *OrderDuration) UnmarshalCSV(csv string) (err error) {
 }
 
 type OrderDetail struct {
-	Location      string        `csv:"Location"`
-	OrderID       int           `csv:"Order Id"`
-	OrderNumber   int           `csv:"Order #"`
-	Checks        int           `csv:"Checks"`
-	Opened        DateTime      `csv:"Opened"`
-	TabNames      string        `csv:"Tab Names"`
-	Server        string        `csv:"Server"`
-	Service       string        `csv:"Service"`
-	DiningOptions string        `csv:"Dining Options"`
-	Discount      string        `csv:"Discount Amount"`
-	Amount        float64       `csv:"Amount"`
-	Tax           float64       `csv:"Tax"`
-	Tip           float64       `csv:"Tip"`
-	Total         float64       `csv:"Total"`
-	Voided        bool          `csv:"Voided"`
-	Paid          DateTime      `csv:"Paid"`
-	Closed        DateTime      `csv:"Closed"`
-	Duration      OrderDuration `csv:"Duration (Opened to Paid)"`
-	OrderSource   string        `csv:"Order Source"`
+	PaymentDetails PaymentDetails
+	Location       string        `csv:"Location"`
+	OrderID        string        `csv:"Order Id"`
+	OrderNumber    int           `csv:"Order #"`
+	Checks         int           `csv:"Checks"`
+	Opened         DateTime      `csv:"Opened"`
+	TabNames       string        `csv:"Tab Names"`
+	Server         string        `csv:"Server"`
+	Service        string        `csv:"Service"`
+	DiningOptions  string        `csv:"Dining Options"`
+	Discount       string        `csv:"Discount Amount"`
+	Amount         float64       `csv:"Amount"`
+	Tax            float64       `csv:"Tax"`
+	Tip            float64       `csv:"Tip"`
+	Total          float64       `csv:"Total"`
+	Voided         bool          `csv:"Voided"`
+	Paid           DateTime      `csv:"Paid"`
+	Closed         DateTime      `csv:"Closed"`
+	Duration       OrderDuration `csv:"Duration (Opened to Paid)"`
+	OrderSource    string        `csv:"Order Source"`
+}
+
+func (o OrderDetail) GetCashTendered() float64 {
+	cashTendered := 0.0
+	for _, payment := range o.PaymentDetails {
+		if payment.PaymentType == "Cash" {
+			cashTendered += payment.AmountTendered
+		}
+	}
+
+	return cashTendered
+}
+
+func (o OrderDetail) GetCCFee() float64 {
+	ccFee := 0.0
+	for _, payment := range o.PaymentDetails {
+		ccFee += payment.CardFees
+	}
+
+	return ccFee
 }
 
 func (o OrderDetail) Show() string {

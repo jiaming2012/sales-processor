@@ -10,6 +10,8 @@ type OrderSummary struct {
 	TotalSales     float64
 	TotalTaxes     float64
 	TotalTips      float64
+	CashTendered   float64
+	CCFees         float64
 	AvgDuration    time.Duration
 	Voids          int
 	MissedPayments []*OrderDetail

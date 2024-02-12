@@ -72,6 +72,7 @@ type commissionBasedEmployeesTopLineSummary struct {
 	SalesCommissionPercentage float64
 	CashHeld                  []float64
 	Taxes                     float64
+	CashTendered              float64
 }
 
 func (s commissionBasedEmployeesTopLineSummary) GetCommission() float64 {
@@ -101,7 +102,7 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 	totalCashHeld := 0.0
 
 	if len(s.CashHeld) == 0 {
-		output.WriteString("No cash taken\n")
+		output.WriteString("No cash taken.\n")
 	} else {
 		for _, cash := range s.CashHeld {
 			output.WriteString(fmt.Sprintf("  -$%.2f\n", cash))
@@ -109,12 +110,17 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 		}
 	}
 
+	if s.CashTendered > totalCashHeld {
+		cashLeftover := s.CashTendered - totalCashHeld
+		output.WriteString(fmt.Sprintf("Cash Left in Register: $%.2f\n", cashLeftover))
+	}
+
 	output.WriteString(fmt.Sprintf("\nDeposit: $%.2f\n", commission+s.Tips-s.Taxes-totalCashHeld))
 
 	return output.String()
 }
 
-func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.Time, name string, netSales float64, tips float64, salesCommissionPercentage float64, cashHeld []float64) *commissionBasedEmployeesTopLineSummary {
+func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.Time, name string, netSales float64, tips float64, salesCommissionPercentage float64, cashHeld []float64, cashTendered float64) *commissionBasedEmployeesTopLineSummary {
 	s := &commissionBasedEmployeesTopLineSummary{
 		FromDate:                  fromDate,
 		ToDate:                    toDate,
@@ -123,6 +129,7 @@ func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.T
 		Tips:                      tips,
 		CashHeld:                  cashHeld,
 		SalesCommissionPercentage: salesCommissionPercentage,
+		CashTendered:              cashTendered,
 	}
 
 	// todo: taxes should be grabbed before summary is creted
