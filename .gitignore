@@ -2,3 +2,4 @@ output/
 creds/
 .DS_Store
 *.csv
+__debug*

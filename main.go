@@ -802,6 +802,7 @@ func main() {
 	for _, date := range dates {
 		reportOutput.WriteString(fmt.Sprintf("%s - %s\n", date.Format("2006/01/02"), date.Weekday()))
 
+		//--- Fetch order details from toast
 		orderDetails := fetchOrderDetails(date.Format("20060102"))
 		summary, err := ProcessOrderDetails(orderDetails, tipsWithheldPercentage)
 		if err != nil {

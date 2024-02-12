@@ -109,7 +109,7 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 		}
 	}
 
-	output.WriteString(fmt.Sprintf("\nDeposit: -$%.2f\n", commission+s.Tips-s.Taxes-totalCashHeld))
+	output.WriteString(fmt.Sprintf("\nDeposit: $%.2f\n", commission+s.Tips-s.Taxes-totalCashHeld))
 
 	return output.String()
 }
