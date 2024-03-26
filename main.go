@@ -240,7 +240,7 @@ func fetchToastCSVReports(date string) []*models.OrderDetail {
 		bytes, err := ioutil.ReadAll(file)
 		if err != nil {
 			file.Close()
-			log.Fatal(fmt.Errorf("failed to read bytes: %w", bytes))
+			log.Fatalf("failed to read bytes: %v", bytes)
 		}
 
 		// todo: save to database

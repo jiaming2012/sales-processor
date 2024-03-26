@@ -2,8 +2,9 @@ package models
 
 import (
 	"fmt"
-	log "github.com/sirupsen/logrus"
 	"strconv"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type SlingsUsersDTO struct {
@@ -73,13 +74,15 @@ func (dto *SlingUserDTO) ToSlingUser(commissionBasedEmployees []CommissionBasedE
 		}
 	}
 
-	if len(dto.Wages.Base) != 1 {
-		return nil, false, fmt.Errorf("could not find a single wage for user %v %v. found %v wages", dto.FirstName, dto.LastName, len(dto.Wages.Base))
-	}
-
-	wage, err := strconv.ParseFloat(dto.Wages.Base[0].RegularRate, 64)
-	if err != nil {
-		return nil, false, fmt.Errorf("could not parse wage of %v for %v %v", dto.Wages.Base[0].RegularRate, dto.FirstName, dto.LastName)
+	var wage float64
+	if len(dto.Wages.Base) == 0 {
+		wage = 0.0
+	} else if len(dto.Wages.Base) == 1 {
+		if wage, err = strconv.ParseFloat(dto.Wages.Base[0].RegularRate, 64); err != nil {
+			return nil, false, fmt.Errorf("could not parse wage of %v for %v %v", dto.Wages.Base[0].RegularRate, dto.FirstName, dto.LastName)
+		}
+	} else {
+		return nil, false, fmt.Errorf("unexpected: should be zero or one for user %v %v. found %v wages", dto.FirstName, dto.LastName, len(dto.Wages.Base))
 	}
 
 	return &SlingUser{
