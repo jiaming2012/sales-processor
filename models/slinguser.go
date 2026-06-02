@@ -3,6 +3,7 @@ package models
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -74,15 +75,31 @@ func (dto *SlingUserDTO) ToSlingUser(commissionBasedEmployees []CommissionBasedE
 		}
 	}
 
-	var wage float64
 	if len(dto.Wages.Base) == 0 {
-		wage = 0.0
-	} else if len(dto.Wages.Base) == 1 {
-		if wage, err = strconv.ParseFloat(dto.Wages.Base[0].RegularRate, 64); err != nil {
-			return nil, false, fmt.Errorf("could not parse wage of %v for %v %v", dto.Wages.Base[0].RegularRate, dto.FirstName, dto.LastName)
+		return nil, false, fmt.Errorf("wage not set in sling for %s %s. Found 0 wages", dto.FirstName, dto.LastName)
+	}
+
+	var wage float64
+	previousWageDateEffective := time.Time{}
+	for _, baseWage := range dto.Wages.Base {
+		// convert baseWage to time.Time
+		dateEffective, err := time.Parse("2006-01-02", baseWage.DateEffective)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to parse dateEffective: %w", err)
 		}
-	} else {
-		return nil, false, fmt.Errorf("unexpected: should be zero or one for user %v %v. found %v wages", dto.FirstName, dto.LastName, len(dto.Wages.Base))
+
+		if dateEffective.After(previousWageDateEffective) {
+			wage, err = strconv.ParseFloat(baseWage.RegularRate, 64)
+			if err != nil {
+				return nil, false, fmt.Errorf("failed to parse wage: %w", err)
+			}
+
+			previousWageDateEffective = dateEffective
+		}
+	}
+
+	if wage == 0 {
+		return nil, false, fmt.Errorf("expected to find a wage for %s %s. Found %v", dto.FirstName, dto.LastName, wage)
 	}
 
 	return &SlingUser{

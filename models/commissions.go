@@ -2,13 +2,15 @@ package models
 
 import (
 	"fmt"
+	"log"
+	"math"
 	"strings"
 	"time"
 )
 
 type CommissionSalesItem interface {
 	IsSatisfied(sales float64) bool
-	GetSalesCommissionPercentage() float64
+	GetSalesCommissionPercentage(weeklySummary *WeeklySummary) float64
 }
 
 type CommissionSalesIsLessThan struct {
@@ -20,8 +22,16 @@ func (i CommissionSalesIsLessThan) IsSatisfied(sales float64) bool {
 	return sales < i.SalesThreshold
 }
 
-func (i CommissionSalesIsLessThan) GetSalesCommissionPercentage() float64 {
-	return i.SalesCommissionPercentage
+func CalculateSalesCommissionPercentage(weeklySummary *WeeklySummary) float64 {
+	sales := weeklySummary.Sales
+	hourlyWorkersComp := weeklySummary.TotalHourlyWorkersExpense()
+
+	splitNumerator := (sales - hourlyWorkersComp) / 2.75
+	return splitNumerator / sales
+}
+
+func (i CommissionSalesIsLessThan) GetSalesCommissionPercentage(weeklySummary *WeeklySummary) float64 {
+	return CalculateSalesCommissionPercentage(weeklySummary)
 }
 
 func (i CommissionSalesIsLessThan) String() string {
@@ -34,10 +44,11 @@ type CommissionSalesIsGreaterThanOrEqual struct {
 }
 
 func (i CommissionSalesIsGreaterThanOrEqual) IsSatisfied(sales float64) bool {
+	log.Fatalf("Congrats on reaching the milestone of $%v weekly sales. Please implement a new compensation policy for this level.")
 	return sales >= i.SalesThreshold
 }
 
-func (i CommissionSalesIsGreaterThanOrEqual) GetSalesCommissionPercentage() float64 {
+func (i CommissionSalesIsGreaterThanOrEqual) GetSalesCommissionPercentage(weeklySummary *WeeklySummary) float64 {
 	return i.SalesCommissionPercentage
 }
 
@@ -47,10 +58,11 @@ func (i CommissionSalesIsGreaterThanOrEqual) String() string {
 
 type CommissionSalesStructure []CommissionSalesItem
 
-func (i CommissionSalesStructure) GetSalesCommissionPercentage(sales float64) (float64, error) {
+func (i CommissionSalesStructure) GetSalesCommissionPercentage(weeklySummary *WeeklySummary) (float64, error) {
+	sales := weeklySummary.Sales
 	for _, structure := range i {
 		if structure.IsSatisfied(sales) {
-			return structure.GetSalesCommissionPercentage(), nil
+			return structure.GetSalesCommissionPercentage(weeklySummary), nil
 		}
 	}
 
@@ -73,6 +85,7 @@ type commissionBasedEmployeesTopLineSummary struct {
 	CashHeld                  []float64
 	Taxes                     float64
 	CashTendered              float64
+	RentHold                  float64
 }
 
 func (s commissionBasedEmployeesTopLineSummary) GetCommission() float64 {
@@ -83,16 +96,31 @@ func (s commissionBasedEmployeesTopLineSummary) GetPretaxPay() float64 {
 	return s.GetCommission() + s.Tips
 }
 
+func (s commissionBasedEmployeesTopLineSummary) GetBasePay() float64 {
+	basePay := 300.0
+	commission := s.GetCommission()
+
+	if commission > basePay {
+		diff := commission - basePay
+		basePay -= diff
+	}
+
+	return math.Max(basePay, 0.0)
+}
+
 func (s commissionBasedEmployeesTopLineSummary) Show() string {
 	output := strings.Builder{}
 
 	output.WriteString(fmt.Sprintf("PAY for %s %s - %s\n\n", s.Name, s.FromDate.Format("01/02"), s.ToDate.Format("01/02")))
 
 	commission := s.GetCommission()
+	basePay := s.GetBasePay()
+
+	output.WriteString(fmt.Sprintf("Base Pay: $%.2f\n", basePay))
 	output.WriteString(fmt.Sprintf("Sales: $%.2f * %.0f%% = $%.2f\n", s.NetSales, s.SalesCommissionPercentage*100, commission))
 	output.WriteString(fmt.Sprintf("Tips: $%.2f\n", s.Tips))
 
-	preTaxPay := commission + s.Tips
+	preTaxPay := basePay + commission + s.Tips
 	output.WriteString(fmt.Sprintf("\nPretax Pay: $%.2f\n", preTaxPay))
 	output.WriteString(fmt.Sprintf("Taxes: -$%.2f\n", s.Taxes))
 	output.WriteString(fmt.Sprintf("Net Pay: $%.2f\n", preTaxPay-s.Taxes))
@@ -115,12 +143,16 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 		output.WriteString(fmt.Sprintf("Cash Left in Register: $%.2f\n", cashLeftover))
 	}
 
-	output.WriteString(fmt.Sprintf("\nDeposit: $%.2f\n", commission+s.Tips-s.Taxes-totalCashHeld))
+	if s.RentHold > 0 {
+		output.WriteString(fmt.Sprintf("\nRent Hold: -$%.2f\n", s.RentHold))
+	}
+
+	output.WriteString(fmt.Sprintf("\nDeposit: $%.2f\n", commission+s.Tips-s.Taxes-totalCashHeld-s.RentHold))
 
 	return output.String()
 }
 
-func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.Time, name string, netSales float64, tips float64, salesCommissionPercentage float64, cashHeld []float64, cashTendered float64) *commissionBasedEmployeesTopLineSummary {
+func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.Time, name string, netSales float64, tips float64, salesCommissionPercentage float64, cashHeld []float64, cashTendered float64, rentHold float64) *commissionBasedEmployeesTopLineSummary {
 	s := &commissionBasedEmployeesTopLineSummary{
 		FromDate:                  fromDate,
 		ToDate:                    toDate,
@@ -130,6 +162,7 @@ func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.T
 		CashHeld:                  cashHeld,
 		SalesCommissionPercentage: salesCommissionPercentage,
 		CashTendered:              cashTendered,
+		RentHold:                  rentHold,
 	}
 
 	// todo: taxes should be grabbed before summary is creted

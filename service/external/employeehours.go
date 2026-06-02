@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -36,25 +37,26 @@ type SlingTimesheetProjectionDTO struct {
 	PaidMinutes  int       `json:"paidMinutes"`
 }
 
-func (dto *SlingTimesheetItemDTO) ConvertToSlingTimesheetItemShift() (*SlingTimesheetItemShift, error) {
-	isApproved := false
+func (dto *SlingTimesheetItemDTO) ConvertToSlingTimesheetItemShift() ([]*SlingTimesheetItemShift, error) {
+	var shifts []*SlingTimesheetItemShift
 
-	if len(dto.Projections) != 1 {
-		return nil, fmt.Errorf("expected number of timesheet projections to be one. Found %v", len(dto.Projections))
+	for _, proj := range dto.Projections {
+		fmt.Printf("DEBUG: projection: clockIn=%v, clockOut=%v, status=%v, breakMinutes=%v, paidMinutes=%v\n", proj.ClockIn, proj.ClockOut, *proj.Status, proj.BreakMinutes, proj.PaidMinutes)
+
+		isApproved := false
+		if proj.Status != nil && *proj.Status == "approved" {
+			isApproved = true
+		}
+
+		shifts = append(shifts, &SlingTimesheetItemShift{
+			ClockIn:    proj.ClockIn,
+			ClockOut:   proj.ClockOut,
+			IsApproved: isApproved,
+			Hours:      float64(proj.PaidMinutes) / 60.0,
+		})
 	}
 
-	timesheet := dto.Projections[0]
-
-	if timesheet.Status != nil && *timesheet.Status == "approved" {
-		isApproved = true
-	}
-
-	return &SlingTimesheetItemShift{
-		ClockIn:    timesheet.ClockIn,
-		ClockOut:   timesheet.ClockOut,
-		IsApproved: isApproved,
-		Hours:      float64(timesheet.PaidMinutes) / 60.0,
-	}, nil
+	return shifts, nil
 }
 
 type SlingTimesheetItemShift struct {
@@ -119,39 +121,42 @@ func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (Sling
 			continue
 		}
 
-		itemShift, convErr := dto.ConvertToSlingTimesheetItemShift()
+		itemShifts, convErr := dto.ConvertToSlingTimesheetItemShift()
 
 		if convErr != nil {
 			return nil, fmt.Errorf("failed to convert user id=%v: %w", dto.User, convErr)
 		}
 
-		if itemShift.Hours == 0 {
-			continue
-		}
+		for _, itemShift := range itemShifts {
+			if itemShift.Hours == 0 {
+				continue
+			}
 
-		user, ok := c.users[dto.User.ID]
-		if !ok {
-			return nil, fmt.Errorf("failed to find user with user.id=%v", dto.User.ID)
-		}
+			user, ok := c.users[dto.User.ID]
+			if !ok {
+				log.Infof("failed to find user with user.id=%v, skipping ...", dto.User.ID)
+				continue
+			}
 
-		if !itemShift.IsApproved {
-			if user.CommissionSalesStructure != nil {
-				log.Debugf("surpressing error: commission based employee, %v, is allowed to have unapproved shift %v -> %v", user, itemShift.ClockIn, itemShift.ClockOut)
+			if !itemShift.IsApproved {
+				if user.CommissionSalesStructure != nil {
+					log.Debugf("surpressing error: commission based employee, %v, is allowed to have unapproved shift %v -> %v", user, itemShift.ClockIn, itemShift.ClockOut)
+				} else {
+					return nil, fmt.Errorf("unapproved shift found for %v from %v -> %v", user.Name(), itemShift.ClockIn, itemShift.ClockOut)
+				}
+			}
+
+			if _, found := userIDCache[dto.User.ID]; !found {
+				// make singleton list
+				slingPayroll[user] = []SlingTimesheetItemShift{
+					*itemShift,
+				}
+
+				// update the cache
+				userIDCache[dto.User.ID] = struct{}{}
 			} else {
-				return nil, fmt.Errorf("unapproved shift found for %v from %v -> %v", user.Name(), itemShift.ClockIn, itemShift.ClockOut)
+				slingPayroll[user] = append(slingPayroll[user], *itemShift)
 			}
-		}
-
-		if _, found := userIDCache[dto.User.ID]; !found {
-			// make singleton list
-			slingPayroll[user] = []SlingTimesheetItemShift{
-				*itemShift,
-			}
-
-			// update the cache
-			userIDCache[dto.User.ID] = struct{}{}
-		} else {
-			slingPayroll[user] = append(slingPayroll[user], *itemShift)
 		}
 	}
 
@@ -189,6 +194,14 @@ func (c *slingTimesheetClient) PopulateUsers(commissionBasedEmployees []models.C
 	for _, dto := range slingDTO.Users {
 		user, found, dtoErr := dto.ToSlingUser(commissionBasedEmployees)
 		if dtoErr != nil {
+			fmt.Printf("ERROR: %v: skip user? (y/n)\n", dtoErr)
+			var skip string
+			fmt.Scanln(&skip)
+
+			if strings.ToLower(skip) == "y" {
+				continue
+			}
+
 			return fmt.Errorf("failed to convert dto: %w", dtoErr)
 		}
 

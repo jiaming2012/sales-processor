@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/csv"
@@ -234,6 +235,7 @@ func fetchToastCSVReports(date string) []*models.OrderDetail {
 
 		file, err := client.Download(remoteFileName)
 		if err != nil {
+			continue
 			log.Fatal(fmt.Errorf("failed to download %v: %w", remoteFileName, err))
 		}
 
@@ -388,7 +390,7 @@ func CalcTipShare(durationWorked time.Duration) int {
 // 4 - 6 -> 66%
 // 2 - 4 -> 33%
 // <2 -> 0%
-func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours, cashEmployeesPay []models.CashEmployeePay) models.WeeklySummary {
+func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours, previousEmployeeHours []models.EmployeeHours, cashEmployeesPay []models.CashEmployeePay) models.WeeklySummary {
 	var tipDetails models.TipDetails
 	tipDetails.Details = make(map[models.Employee]float64)
 	totalSales := 0.0
@@ -411,8 +413,14 @@ func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesh
 			}
 		}
 
-		for employee, _ := range schedule.Shifts {
-			tipDetails.Details[employee] += (float64(tipsShare[employee]) / float64(tipPool)) * summary.Tips
+		for employee := range schedule.Shifts {
+			if employee == "Latanya Mcgriff" {
+				tipDetails.Details[employee] += (float64(tipPool) / float64(tipPool)) * summary.Tips
+			} else {
+				tipDetails.Details[employee] += 0.0
+			}
+			// todo: reenable when we start sharing tips
+			// tipDetails.Details[employee] += (float64(tipsShare[employee]) / float64(tipPool)) * summary.Tips
 		}
 
 		totalSales += summary.Sales
@@ -429,6 +437,7 @@ func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesh
 		CashTendered:     totalCashTendered,
 		CCFees:           totalCCFees,
 		Hours:            employeeHours,
+		PreviousHours:    previousEmployeeHours,
 		CashEmployeesPay: cashEmployeesPay,
 	}
 }
@@ -622,43 +631,47 @@ func getCashEmployeeWages(cashEmployees []models.CashEmployeeInputParam, default
 		// Ask the user to enter a withdrawal amount from stdin
 		fmt.Printf("Enter %s's net pay (or -1 to quit):\n", employee.Name)
 
-		var metPay float64
-		if _, err := fmt.Scanln(&metPay); err != nil {
+		var netPay float64
+		if _, err := fmt.Scanln(&netPay); err != nil {
 			panic(err)
 		}
 
-		if metPay < 0 {
+		if netPay < 0 {
 			break
 		}
 
-		taxes := metPay * employee.TaxRate
+		taxes := netPay * employee.TaxRate
 
 		cashEmployeesPay = append(cashEmployeesPay, models.CashEmployeePay{
 			Name:   employee.Name,
-			NetPay: metPay,
+			NetPay: netPay,
 			Taxes:  taxes,
 		})
 	}
 
 	// Ask if any other cash employees were paid
+	reader := bufio.NewReader(os.Stdin)
 	for {
 		var answer string
 
 		fmt.Printf("Was any other cash employee paid? (y)es or (n)o\n")
 
-		fmt.Scanln(&answer)
+		// fmt.Scanln(&answer)
+		answer = "n"
 
 		if strings.ToLower(answer) == "n" {
 			break
 		}
 
-		var employeeName string
-		var netPay float64
-
 		fmt.Printf("Enter the employee's name:\n")
-		fmt.Scanln(&employeeName)
+		employeeName, _ := reader.ReadString('\n')
 		fmt.Printf("Enter %s's net pay:\n", employeeName)
-		fmt.Scanln(&netPay)
+		netPayStr, _ := reader.ReadString('\n')
+
+		netPay, err := strconv.ParseFloat(strings.TrimRight(netPayStr, "\n"), 64)
+		if err != nil {
+			panic(fmt.Errorf("failed to parse net pay: %w", err))
+		}
 
 		cashEmployeesPay = append(cashEmployeesPay, models.CashEmployeePay{
 			Name:   employeeName,
@@ -680,9 +693,9 @@ func getCashHeld() []float64 {
 		fmt.Println("Enter a withdrawal amount (or 0 to quit):")
 
 		var amount int
-		if _, err := fmt.Scanln(&amount); err != nil {
-			panic(err)
-		}
+		// if _, err := fmt.Scanln(&amount); err != nil {
+		// 	panic(err)
+		// }
 
 		if amount == 0 {
 			break
@@ -723,25 +736,21 @@ func main() {
 	slingPassword := "9@^P9bZR7RGu37zk"
 	tipsWithheldPercentage := 0.03
 	cashEmployees := []models.CashEmployeeInputParam{
-		{
-			Name:    "Aly",
-			TaxRate: 0.25 + 0.0765, // 22% federal + 7.65% payroll + 3% buffer
-		},
+		// {
+		// 	Name:    "Aly",
+		// 	TaxRate: 0.25 + 0.0765, // 22% federal + 7.65% payroll + 3% buffer
+		// },
 	}
 	defaultEmployeeTaxRate := 0.25
 
 	commissionSalesStructureStandard := &models.CommissionSalesStructure{
 		models.CommissionSalesIsLessThan{
-			SalesThreshold:            2300,
-			SalesCommissionPercentage: 0.15,
-		},
-		models.CommissionSalesIsLessThan{
-			SalesThreshold:            3000,
-			SalesCommissionPercentage: 0.18,
+			SalesThreshold: 8000.0,
+			// SalesCommissionPercentage: 0.3,
 		},
 		models.CommissionSalesIsGreaterThanOrEqual{
-			SalesThreshold:            3000,
-			SalesCommissionPercentage: 0.20,
+			SalesThreshold: 8000,
+			// SalesCommissionPercentage: 0.25,
 		},
 	}
 
@@ -787,6 +796,26 @@ func main() {
 			EmployeeID: 100,
 			Day:        time.Sunday,
 		},
+		{
+			EmployeeID: 112,
+			Day:        time.Wednesday,
+		},
+		{
+			EmployeeID: 112,
+			Day:        time.Thursday,
+		},
+		{
+			EmployeeID: 112,
+			Day:        time.Friday,
+		},
+		{
+			EmployeeID: 112,
+			Day:        time.Saturday,
+		},
+		{
+			EmployeeID: 112,
+			Day:        time.Sunday,
+		},
 	}
 
 	// fetch dates in reporting period
@@ -812,10 +841,19 @@ func main() {
 	//--- Get Cash Employee Wages ---
 	cashEmployeeWages := getCashEmployeeWages(cashEmployees, defaultEmployeeTaxRate)
 
-	//--- Report Headers ---
-	dates := service.GetDatesStartingFromPreviousMonday()
+	//--- Report Headers (Current Timesheet) ---
+	now := time.Now()
+	sunday := service.GetDateLastSunday(now)
+	dates := service.GetDatesStartingFromPreviousMonday(sunday)
 	fromDate := dates[0].Format("2006-01-02")
 	toDate := dates[len(dates)-1].Format("2006-01-02")
+
+	//--- Report Headers (Previous Timesheet) ---
+	lastWeek := now.AddDate(0, 0, -7)
+	previousSunday := service.GetDateLastSunday(lastWeek)
+	previousDates := service.GetDatesStartingFromPreviousMonday(previousSunday)
+	previousFromDate := previousDates[0].Format("2006-01-02")
+	previousToDate := previousDates[len(previousDates)-1].Format("2006-01-02")
 
 	//--- Fetch Timesheets
 	slingClient, err := external.NewSlingTimesheet(baseURL, slingEmail, slingPassword)
@@ -827,14 +865,19 @@ func main() {
 		panic(err)
 	}
 
-	timesheet, err := slingClient.GetPayroll(fromDate, toDate)
+	currentTimesheet, err := slingClient.GetPayroll(fromDate, toDate)
+	if err != nil {
+		panic(err)
+	}
+
+	previousTimesheet, err := slingClient.GetPayroll(previousFromDate, previousToDate)
 	if err != nil {
 		panic(err)
 	}
 
 	//--- Process Timesheets ---
 	var employeeHours []models.EmployeeHours
-	for user, i := range timesheet {
+	for user, i := range currentTimesheet {
 		if user.CommissionSalesStructure != nil {
 			log.Debugf("skip summing hours for commission based employee %v", user)
 			continue
@@ -846,6 +889,24 @@ func main() {
 		}
 
 		employeeHours = append(employeeHours, models.EmployeeHours{
+			Employee: user,
+			Hours:    hours,
+		})
+	}
+
+	var previousEmployeeHours []models.EmployeeHours
+	for user, i := range previousTimesheet {
+		if user.CommissionSalesStructure != nil {
+			log.Debugf("skip summing hours for commission based employee %v", user)
+			continue
+		}
+
+		hours, err := external.SlingTimesheetItemShifts(i).GetTotalHours()
+		if err != nil {
+			panic(err)
+		}
+
+		previousEmployeeHours = append(previousEmployeeHours, models.EmployeeHours{
 			Employee: user,
 			Hours:    hours,
 		})
@@ -884,12 +945,12 @@ func main() {
 	log.Infof("unpaidOrdersSummary.TotalTips %.2f", unpaidOrdersSummary.TotalTips)
 
 	//--- Fetch Timesheets ---
-	ts, err := timesheet.FetchTimesheet(exclusions)
+	ts, err := currentTimesheet.FetchTimesheet(exclusions)
 	if err != nil {
 		panic(err)
 	}
 
-	weeklySummary := CalculateWeeklyReport(dailyReport, ts, employeeHours, cashEmployeeWages)
+	weeklySummary := CalculateWeeklyReport(dailyReport, ts, employeeHours, previousEmployeeHours, cashEmployeeWages)
 
 	//--- todo: wait for manual input
 
@@ -909,18 +970,19 @@ func main() {
 
 		tips := weeklySummary.Tips.Details[models.Employee(empl.Name)]
 
-		salesCommissionPercentage, err := empl.CommissionSalesStructure.GetSalesCommissionPercentage(weeklySummary.Sales)
+		salesCommissionPercentage, err := empl.CommissionSalesStructure.GetSalesCommissionPercentage(&weeklySummary)
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		// todo: cash held should be broken down by employee
-		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(dates[0], dates[len(dates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld, weeklySummary.CashTendered)
+		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(previousDates[0], previousDates[len(previousDates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld, weeklySummary.CashTendered, 475.0)
 
 		// todo: make employee conversion less janky
 		if empl.Name == "Latanya Mcgriff" {
-			netPay := commissionBasedEmployeesSummary.GetPretaxPay()
-			employerTaxes := netPay * 0.0765
+			pretaxPay := commissionBasedEmployeesSummary.GetPretaxPay()
+			employerTaxes := pretaxPay * 0.0765
+			netPay := pretaxPay + commissionBasedEmployeesSummary.GetBasePay()
 			cashEmployeeWages = append(cashEmployeeWages, models.CashEmployeePay{
 				Name:   empl.Name,
 				NetPay: netPay,
@@ -978,7 +1040,7 @@ func main() {
 		}
 	}
 
-	writePDF(reportOutput.String(), fromDate, toDate)
+	writePDF(reportOutput.String(), previousFromDate, toDate)
 
 	f, err := os.Create(fmt.Sprintf("output/payroll/payroll_%v.csv", toDate))
 	if err != nil {

@@ -19,7 +19,31 @@ type WeeklySummary struct {
 	CCFees           float64
 	Tips             TipDetails
 	Hours            []EmployeeHours
+	PreviousHours    []EmployeeHours
 	CashEmployeesPay []CashEmployeePay
+}
+
+func (s *WeeklySummary) TotalHourlyWorkersExpense() float64 {
+	totalComp := 0.0
+	totalPayrollTaxes := 0.0
+	for _, employeeHours := range s.Hours {
+		wage := employeeHours.Hours * employeeHours.Employee.Rate
+		tips := s.Tips.Details[employeeHours.Employee.Employee()]
+		totalComp += wage + tips
+
+		// todo: this should be passed in as a parameter to the report
+		payrollTaxes := wage * 0.106
+		totalPayrollTaxes += payrollTaxes
+	}
+
+	for _, cashEmployee := range s.CashEmployeesPay {
+		totalComp += cashEmployee.NetPay + cashEmployee.Taxes
+
+		// todo: this should be passed in as a parameter to the report
+		totalPayrollTaxes += cashEmployee.Taxes
+	}
+
+	return totalComp + totalPayrollTaxes
 }
 
 func (s *WeeklySummary) Show() string {
@@ -37,7 +61,7 @@ func (s *WeeklySummary) Show() string {
 		wages += wage
 
 		// todo: this should be passed in as a parameter to the report
-		payrollTaxes := wage * 0.0765
+		payrollTaxes := wage * 0.106
 		totalPayrollTaxes += payrollTaxes
 		log.Infof("%s payrollTaxes: %.2f", employeeHours.Employee.FirstName, payrollTaxes)
 	}
@@ -53,11 +77,30 @@ func (s *WeeklySummary) Show() string {
 		log.Infof("%s payrollTaxes: %.2f", cashEmployee.Name, cashEmployee.Taxes)
 	}
 
+	// -------
+	wageOutput.WriteString("----------------------------\nPrevious Hours:\n")
+	previousWages := 0.0
+	previousTotalPayrollTaxes := 0.0
+	for _, employeeHours := range s.PreviousHours {
+		wage := employeeHours.Hours * employeeHours.Employee.Rate
+		tips := s.Tips.Details[employeeHours.Employee.Employee()]
+		totalComp := wage + tips
+		wageOutput.WriteString(fmt.Sprintf("%v: %.2f hours @ $%.2f/hr = $%.2f + $%.2f tips = $%.2f total compensation\n", employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, totalComp))
+		wageOutput.WriteString("\n")
+		previousWages += wage
+
+		// todo: this should be passed in as a parameter to the report
+		payrollTaxes := wage * 0.106
+		previousTotalPayrollTaxes += payrollTaxes
+		log.Infof("%s payrollTaxes: %.2f", employeeHours.Employee.FirstName, payrollTaxes)
+	}
+
 	employeeCosts := wages + totalPayrollTaxes
 
 	output.WriteString("Summary\n")
 	output.WriteString("-----------------------\n")
 	output.WriteString(fmt.Sprintf("Wages: $%.2f\n", wages))
+	output.WriteString(fmt.Sprintf("Previous Wages: $%.2f\n", previousWages))
 	output.WriteString(fmt.Sprintf("Payroll Taxes: $%.2f\n", totalPayrollTaxes))
 	output.WriteString(fmt.Sprintf("Total Employee Costs: $%.2f\n", employeeCosts))
 	output.WriteString(fmt.Sprintf("Net Sales: $%.2f\n", s.Sales))

@@ -2,20 +2,15 @@ package service
 
 import "time"
 
-func getDateLastSunday() time.Time {
-	now := time.Now()
-
-	weekday := now.Weekday()
+func GetDateLastSunday(since time.Time) time.Time {
+	weekday := since.Weekday()
 	daysSinceSunday := (int(weekday) + 7) % 7
 
-	return now.AddDate(0, 0, -daysSinceSunday)
+	return since.AddDate(0, 0, -daysSinceSunday)
 }
 
-func GetDatesStartingFromPreviousMonday() []time.Time {
+func GetDatesStartingFromPreviousMonday(sunday time.Time) []time.Time {
 	var dates []time.Time
-
-	// Get the current date and time
-	sunday := getDateLastSunday()
 
 	// Calculate the previous Monday
 	weekday := sunday.Weekday()
