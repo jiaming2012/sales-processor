@@ -3,3 +3,5 @@ creds/
 .DS_Store
 *.csv
 __debug*
+.env
+.env.sandbox

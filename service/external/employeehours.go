@@ -41,8 +41,6 @@ func (dto *SlingTimesheetItemDTO) ConvertToSlingTimesheetItemShift() ([]*SlingTi
 	var shifts []*SlingTimesheetItemShift
 
 	for _, proj := range dto.Projections {
-		fmt.Printf("DEBUG: projection: clockIn=%v, clockOut=%v, status=%v, breakMinutes=%v, paidMinutes=%v\n", proj.ClockIn, proj.ClockOut, *proj.Status, proj.BreakMinutes, proj.PaidMinutes)
-
 		isApproved := false
 		if proj.Status != nil && *proj.Status == "approved" {
 			isApproved = true

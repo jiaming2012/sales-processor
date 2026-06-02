@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
+	"flag"
 	"encoding/csv"
 	"fmt"
 	"io/ioutil"
@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-pdf/fpdf"
 	"github.com/gocarina/gocsv"
+	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/api/option"
 	googlesheets "google.golang.org/api/sheets/v4"
@@ -649,87 +650,114 @@ func getCashEmployeeWages(cashEmployees []models.CashEmployeeInputParam, default
 		})
 	}
 
-	// Ask if any other cash employees were paid
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		var answer string
-
-		fmt.Printf("Was any other cash employee paid? (y)es or (n)o\n")
-
-		// fmt.Scanln(&answer)
-		answer = "n"
-
-		if strings.ToLower(answer) == "n" {
-			break
-		}
-
-		fmt.Printf("Enter the employee's name:\n")
-		employeeName, _ := reader.ReadString('\n')
-		fmt.Printf("Enter %s's net pay:\n", employeeName)
-		netPayStr, _ := reader.ReadString('\n')
-
-		netPay, err := strconv.ParseFloat(strings.TrimRight(netPayStr, "\n"), 64)
-		if err != nil {
-			panic(fmt.Errorf("failed to parse net pay: %w", err))
-		}
-
-		cashEmployeesPay = append(cashEmployeesPay, models.CashEmployeePay{
-			Name:   employeeName,
-			NetPay: netPay,
-			Taxes:  netPay * defaultEmployeeTaxRate,
-		})
-	}
-
-	fmt.Println("done getting cash employee wages ...")
-
 	return cashEmployeesPay
 }
 
 func getCashHeld() []float64 {
-	cashHeld := make([]float64, 0)
+	return make([]float64, 0)
+}
 
+func pickMercuryAccount(accounts []external.MercuryAccount, label string) external.MercuryAccount {
+	fmt.Printf("\nSelect %s account:\n", label)
+	for i, acct := range accounts {
+		fmt.Printf("  %d) %s (%s)\n", i+1, acct.Name, acct.ID)
+	}
+
+	var choice int
 	for {
-		// Ask the user to enter a withdrawal amount from stdin
-		fmt.Println("Enter a withdrawal amount (or 0 to quit):")
-
-		var amount int
-		// if _, err := fmt.Scanln(&amount); err != nil {
-		// 	panic(err)
-		// }
-
-		if amount == 0 {
-			break
-		} else if amount < 0 {
-			fmt.Println("Please enter a positive amount.")
+		fmt.Printf("Enter choice (1-%d): ", len(accounts))
+		if _, err := fmt.Scanln(&choice); err != nil || choice < 1 || choice > len(accounts) {
+			fmt.Println("Invalid choice, try again.")
 			continue
 		}
-
-		cashHeld = append(cashHeld, float64(amount))
+		break
 	}
 
-	return cashHeld
+	return accounts[choice-1]
 }
 
-func promptDeferredTaxesTransfers(cashEmployeeWages []models.CashEmployeePay) {
-	payrollTaxes := 0.0
-	for _, employee := range cashEmployeeWages {
-		payrollTaxes += employee.Taxes
+func executeTransfers(mercuryClient *external.MercuryClient, sourceAccount external.MercuryAccount, transfers []external.MercuryTransferRequest, autoApprove bool) {
+	fmt.Println("\n--- Pending Transfers ---")
+	for _, t := range transfers {
+		fmt.Printf("  $%.2f from %s → %s (%s)\n", t.Amount, sourceAccount.Name, t.Note, t.ToAccountID)
 	}
 
-	prompt := fmt.Sprintf("Transfer $%.2f to deferred taxes account ... (press enter to continue)", payrollTaxes)
-	fmt.Println(prompt)
-	fmt.Scanln()
+	if !autoApprove {
+		fmt.Printf("\nExecute %d transfer(s)? (y/n): ", len(transfers))
+		var answer string
+		fmt.Scanln(&answer)
+
+		if strings.ToLower(answer) != "y" {
+			fmt.Println("Transfers skipped.")
+			return
+		}
+	}
+
+	for _, t := range transfers {
+		if err := mercuryClient.CreateInternalTransfer(t); err != nil {
+			log.Errorf("transfer failed (%s): %v", t.Note, err)
+		} else {
+			fmt.Printf("  Transferred $%.2f → %s\n", t.Amount, t.Note)
+		}
+	}
 }
 
-func promptTransfers(salesTax float64) {
-	salesTaxPrompt := fmt.Sprintf("Transfer $%.2f to sales tax account ... (press enter to continue)", salesTax)
-	fmt.Println(salesTaxPrompt)
-	fmt.Scanln()
+func saveEnvVar(envVar string, value string) {
+	envFile := ".env"
+	if os.Getenv("MERCURY_SANDBOX") == "true" {
+		envFile = ".env.sandbox"
+	}
 
-	// todo: prompt for other transfers -- includes cash held
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		log.Errorf("failed to read %s: %v", envFile, err)
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, envVar+"=") {
+			lines[i] = envVar + "=" + value
+			found = true
+			break
+		}
+	}
+	if !found {
+		lines = append(lines, envVar+"="+value)
+	}
+
+	if err := os.WriteFile(envFile, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		log.Errorf("failed to write %s: %v", envFile, err)
+	}
+}
+
+func resolveMercuryAccount(accounts []external.MercuryAccount, envVar string, label string) external.MercuryAccount {
+	if id := os.Getenv(envVar); id != "" {
+		for _, acct := range accounts {
+			if acct.ID == id {
+				log.Infof("Using %s account: %s (%s)", label, acct.Name, acct.ID)
+				return acct
+			}
+		}
+		log.Fatalf("%s=%s not found in Mercury accounts", envVar, id)
+	}
+	acct := pickMercuryAccount(accounts, label)
+	saveEnvVar(envVar, acct.ID)
+	return acct
 }
 
 func main() {
+	autoApproveTransfers := flag.Bool("auto-approve-transfers", false, "automatically approve Mercury transfers without prompting")
+	mercurySandbox := flag.Bool("sandbox", false, "use Mercury sandbox environment")
+	flag.Parse()
+
+	if *mercurySandbox {
+		godotenv.Load(".env.sandbox")
+	} else {
+		godotenv.Load()
+	}
+
 	//--- Variables ---
 	baseURL := "https://api.getsling.com/v1"
 	slingEmail := "jamal@yumyums.kitchen"
@@ -742,6 +770,7 @@ func main() {
 		// },
 	}
 	defaultEmployeeTaxRate := 0.25
+	rentHoldAmount := 475.0
 
 	commissionSalesStructureStandard := &models.CommissionSalesStructure{
 		models.CommissionSalesIsLessThan{
@@ -834,6 +863,23 @@ func main() {
 	//if err != nil {
 	//	panic(err)
 	//}
+
+	//--- Mercury Setup ---
+	mercuryAPIKey := os.Getenv("MERCURY_API_KEY")
+	if mercuryAPIKey == "" {
+		log.Fatal("MERCURY_API_KEY environment variable is required")
+	}
+
+	mercuryClient := external.NewMercuryClient(mercuryAPIKey, *mercurySandbox)
+	mercuryAccounts, err := mercuryClient.ListAccounts()
+	if err != nil {
+		log.Fatalf("failed to list Mercury accounts: %v", err)
+	}
+
+	sourceAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_SOURCE_ACCOUNT_ID", "source (Operations)")
+	salesTaxAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_SALES_TAX_ACCOUNT_ID", "sales tax")
+	deferredTaxAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_DEFERRED_TAX_ACCOUNT_ID", "deferred taxes")
+	rentHoldAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_RENT_HOLD_ACCOUNT_ID", "rent hold (Personal Vacation Fun)")
 
 	//--- Cash Held ---
 	cashHeld := getCashHeld()
@@ -940,10 +986,6 @@ func main() {
 	unpaidOrdersReport := thirdPartyOrdersReport.GetUnpaidOrders()
 	unpaidOrdersSummary := unpaidOrdersReport.GetOrders().GetSummary(tipsWithheldPercentage)
 
-	log.Infof("unpaidOrdersSummary.TotalSales %.2f", unpaidOrdersSummary.TotalSales)
-	log.Infof("unpaidOrdersSummary.TotalTaxes %.2f", unpaidOrdersSummary.TotalTaxes)
-	log.Infof("unpaidOrdersSummary.TotalTips %.2f", unpaidOrdersSummary.TotalTips)
-
 	//--- Fetch Timesheets ---
 	ts, err := currentTimesheet.FetchTimesheet(exclusions)
 	if err != nil {
@@ -976,7 +1018,7 @@ func main() {
 		}
 
 		// todo: cash held should be broken down by employee
-		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(previousDates[0], previousDates[len(previousDates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld, weeklySummary.CashTendered, 475.0)
+		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(previousDates[0], previousDates[len(previousDates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld, weeklySummary.CashTendered, rentHoldAmount, 0.20)
 
 		// todo: make employee conversion less janky
 		if empl.Name == "Latanya Mcgriff" {
@@ -994,15 +1036,46 @@ func main() {
 		reportOutput.WriteString("\n")
 	}
 
-	//--- Transfer to Payment Accounts
-	promptTransfers(weeklySummary.SalesTax)
+	//--- Mercury Transfers ---
+	payrollTaxes := 0.0
+	for _, employee := range cashEmployeeWages {
+		payrollTaxes += employee.Taxes
+	}
 
-	//--- Transfer to Deferred Taxes Accounts
-	promptDeferredTaxesTransfers(cashEmployeeWages)
+	var transfers []external.MercuryTransferRequest
+	if weeklySummary.SalesTax > 0 {
+		transfers = append(transfers, external.MercuryTransferRequest{
+			FromAccountID: sourceAccount.ID,
+			ToAccountID:   salesTaxAccount.ID,
+			Amount:        weeklySummary.SalesTax,
+			Note:          fmt.Sprintf("Sales tax %s - %s", fromDate, toDate),
+		})
+	}
+	if payrollTaxes > 0 {
+		transfers = append(transfers, external.MercuryTransferRequest{
+			FromAccountID: sourceAccount.ID,
+			ToAccountID:   deferredTaxAccount.ID,
+			Amount:        payrollTaxes,
+			Note:          fmt.Sprintf("Deferred taxes %s - %s", fromDate, toDate),
+		})
+	}
 
-	log.Info(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
+	if rentHoldAmount > 0 {
+		transfers = append(transfers, external.MercuryTransferRequest{
+			FromAccountID: sourceAccount.ID,
+			ToAccountID:   rentHoldAccount.ID,
+			Amount:        rentHoldAmount,
+			Note:          fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
+		})
+	}
 
-	log.Info(unpaidOrdersReport.Show("Cancelled Delivery Orders"))
+	if len(transfers) > 0 {
+		executeTransfers(mercuryClient, sourceAccount, transfers, *autoApproveTransfers)
+	}
+
+	log.Debug(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
+
+	log.Debug(unpaidOrdersReport.Show("Cancelled Delivery Orders"))
 	//cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
 	//if err != nil {
 	//	panic(err)

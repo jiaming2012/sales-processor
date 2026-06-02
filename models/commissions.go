@@ -152,7 +152,7 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 	return output.String()
 }
 
-func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.Time, name string, netSales float64, tips float64, salesCommissionPercentage float64, cashHeld []float64, cashTendered float64, rentHold float64) *commissionBasedEmployeesTopLineSummary {
+func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.Time, name string, netSales float64, tips float64, salesCommissionPercentage float64, cashHeld []float64, cashTendered float64, rentHold float64, employeeTaxRate float64) *commissionBasedEmployeesTopLineSummary {
 	s := &commissionBasedEmployeesTopLineSummary{
 		FromDate:                  fromDate,
 		ToDate:                    toDate,
@@ -165,18 +165,7 @@ func NewCommissionBasedEmployeesTopLineSummary(fromDate time.Time, toDate time.T
 		RentHold:                  rentHold,
 	}
 
-	// todo: taxes should be grabbed before summary is creted
-	var taxes float64
-	fmt.Printf("Enter taxes for %s with pretax pay $%.2f:\n", name, s.GetPretaxPay())
-	if _, err := fmt.Scanln(&taxes); err != nil {
-		panic(err)
-	}
-
-	if taxes < 0 {
-		panic("taxes must be positive")
-	}
-
-	s.Taxes = taxes
+	s.Taxes = s.GetPretaxPay() * employeeTaxRate
 
 	return s
 }
