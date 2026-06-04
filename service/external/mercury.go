@@ -42,6 +42,52 @@ type mercuryTransferPayload struct {
 	IdempotencyKey     string  `json:"idempotencyKey"`
 }
 
+type MercuryRecipient struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+type mercuryListRecipientsResponse struct {
+	Recipients []MercuryRecipient `json:"recipients"`
+}
+
+const (
+	MercuryPaymentMethodACH          = "ach"
+	MercuryPaymentMethodDomesticWire = "domesticWire"
+
+	// SendMoneyPurpose categories. Only the ones we actually use are listed;
+	// see Mercury API docs for the full set.
+	MercuryPurposeTransferToMyExternalAccount = "transferToMyExternalAccount"
+)
+
+type MercurySendMoneyPurposeSimple struct {
+	Category       string `json:"category"`
+	AdditionalInfo string `json:"additionalInfo,omitempty"`
+}
+
+type MercurySendMoneyPurpose struct {
+	Simple MercurySendMoneyPurposeSimple `json:"simple"`
+}
+
+type MercuryExternalTransferRequest struct {
+	FromAccountID string
+	RecipientID   string
+	Amount        float64
+	Note          string
+	PaymentMethod string                   // "ach" or "domesticWire"
+	Purpose       *MercurySendMoneyPurpose // required when PaymentMethod is "domesticWire"
+}
+
+type mercuryExternalTransferPayload struct {
+	RecipientID    string                   `json:"recipientId"`
+	Amount         float64                  `json:"amount"`
+	PaymentMethod  string                   `json:"paymentMethod"`
+	Note           string                   `json:"note,omitempty"`
+	IdempotencyKey string                   `json:"idempotencyKey"`
+	Purpose        *MercurySendMoneyPurpose `json:"purpose,omitempty"`
+}
+
 const (
 	mercuryProductionBaseURL = "https://api.mercury.com/api/v1"
 	mercurySandboxBaseURL    = "https://api-sandbox.mercury.com/api/v1"
@@ -132,6 +178,87 @@ func (c *MercuryClient) CreateInternalTransfer(transfer MercuryTransferRequest) 
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("mercury CreateInternalTransfer: %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	return nil
+}
+
+func (c *MercuryClient) ListRecipients() ([]MercuryRecipient, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/recipients", nil)
+	if err != nil {
+		return nil, fmt.Errorf("mercury ListRecipients: failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mercury ListRecipients: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mercury ListRecipients: %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	var envelope mercuryListRecipientsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("mercury ListRecipients: failed to decode response: %w", err)
+	}
+
+	var active []MercuryRecipient
+	for _, r := range envelope.Recipients {
+		if r.Status == "" || r.Status == "active" {
+			active = append(active, r)
+		}
+	}
+
+	return active, nil
+}
+
+func (c *MercuryClient) CreateExternalTransfer(transfer MercuryExternalTransferRequest) error {
+	if transfer.PaymentMethod != MercuryPaymentMethodACH && transfer.PaymentMethod != MercuryPaymentMethodDomesticWire {
+		return fmt.Errorf("mercury CreateExternalTransfer: invalid paymentMethod %q (must be %q or %q)", transfer.PaymentMethod, MercuryPaymentMethodACH, MercuryPaymentMethodDomesticWire)
+	}
+	if transfer.PaymentMethod == MercuryPaymentMethodDomesticWire && transfer.Purpose == nil {
+		return fmt.Errorf("mercury CreateExternalTransfer: purpose is required for domesticWire transfers")
+	}
+
+	idempotencyKey := fmt.Sprintf("%s-%s-%.2f-%d", transfer.FromAccountID, transfer.RecipientID, transfer.Amount, time.Now().UnixNano())
+
+	payload := mercuryExternalTransferPayload{
+		RecipientID:    transfer.RecipientID,
+		Amount:         transfer.Amount,
+		PaymentMethod:  transfer.PaymentMethod,
+		Note:           transfer.Note,
+		IdempotencyKey: idempotencyKey,
+		Purpose:        transfer.Purpose,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("mercury CreateExternalTransfer: failed to marshal payload: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/account/%s/transactions", c.baseURL, transfer.FromAccountID)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("mercury CreateExternalTransfer: failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("mercury CreateExternalTransfer: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("mercury CreateExternalTransfer: %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 
 	return nil

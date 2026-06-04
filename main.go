@@ -676,6 +676,25 @@ func pickMercuryAccount(accounts []external.MercuryAccount, label string) extern
 	return accounts[choice-1]
 }
 
+func pickMercuryRecipient(recipients []external.MercuryRecipient, label string) external.MercuryRecipient {
+	fmt.Printf("\nSelect %s recipient:\n", label)
+	for i, r := range recipients {
+		fmt.Printf("  %d) %s (%s)\n", i+1, r.Name, r.ID)
+	}
+
+	var choice int
+	for {
+		fmt.Printf("Enter choice (1-%d): ", len(recipients))
+		if _, err := fmt.Scanln(&choice); err != nil || choice < 1 || choice > len(recipients) {
+			fmt.Println("Invalid choice, try again.")
+			continue
+		}
+		break
+	}
+
+	return recipients[choice-1]
+}
+
 func executeTransfers(mercuryClient *external.MercuryClient, sourceAccount external.MercuryAccount, transfers []external.MercuryTransferRequest, autoApprove bool) {
 	fmt.Println("\n--- Pending Transfers ---")
 	for _, t := range transfers {
@@ -747,10 +766,52 @@ func resolveMercuryAccount(accounts []external.MercuryAccount, envVar string, la
 	return acct
 }
 
+func resolveMercuryRecipient(recipients []external.MercuryRecipient, envVar string, label string) external.MercuryRecipient {
+	if id := os.Getenv(envVar); id != "" {
+		for _, r := range recipients {
+			if r.ID == id {
+				log.Infof("Using %s recipient: %s (%s)", label, r.Name, r.ID)
+				return r
+			}
+		}
+		log.Fatalf("%s=%s not found in Mercury recipients", envVar, id)
+	}
+	r := pickMercuryRecipient(recipients, label)
+	saveEnvVar(envVar, r.ID)
+	return r
+}
+
+func executeExternalTransfer(mercuryClient *external.MercuryClient, sourceAccount external.MercuryAccount, recipient external.MercuryRecipient, transfer external.MercuryExternalTransferRequest, autoApprove bool) {
+	fmt.Println("\n--- Pending External Transfer ---")
+	fmt.Printf("  $%.2f from %s → %s (%s, %s)\n", transfer.Amount, sourceAccount.Name, recipient.Name, transfer.PaymentMethod, transfer.Note)
+
+	if !autoApprove {
+		fmt.Print("\nExecute external transfer? (y/n): ")
+		var answer string
+		fmt.Scanln(&answer)
+
+		if strings.ToLower(answer) != "y" {
+			fmt.Println("External transfer skipped.")
+			return
+		}
+	}
+
+	if err := mercuryClient.CreateExternalTransfer(transfer); err != nil {
+		log.Errorf("external transfer failed (%s): %v", transfer.Note, err)
+		return
+	}
+	fmt.Printf("  Transferred $%.2f → %s (%s)\n", transfer.Amount, recipient.Name, transfer.PaymentMethod)
+}
+
 func main() {
 	autoApproveTransfers := flag.Bool("auto-approve-transfers", false, "automatically approve Mercury transfers without prompting")
 	mercurySandbox := flag.Bool("sandbox", false, "use Mercury sandbox environment")
+	rentHoldMethod := flag.String("rent-hold-method", external.MercuryPaymentMethodACH, "rent hold payment method: ach or domesticWire")
 	flag.Parse()
+
+	if *rentHoldMethod != external.MercuryPaymentMethodACH && *rentHoldMethod != external.MercuryPaymentMethodDomesticWire {
+		log.Fatalf("invalid --rent-hold-method=%q (must be %q or %q)", *rentHoldMethod, external.MercuryPaymentMethodACH, external.MercuryPaymentMethodDomesticWire)
+	}
 
 	if *mercurySandbox {
 		godotenv.Load(".env.sandbox")
@@ -879,7 +940,12 @@ func main() {
 	sourceAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_SOURCE_ACCOUNT_ID", "source (Operations)")
 	salesTaxAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_SALES_TAX_ACCOUNT_ID", "sales tax")
 	deferredTaxAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_DEFERRED_TAX_ACCOUNT_ID", "deferred taxes")
-	rentHoldAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_RENT_HOLD_ACCOUNT_ID", "rent hold (Personal Vacation Fun)")
+
+	mercuryRecipients, err := mercuryClient.ListRecipients()
+	if err != nil {
+		log.Fatalf("failed to list Mercury recipients: %v", err)
+	}
+	rentHoldRecipient := resolveMercuryRecipient(mercuryRecipients, "MERCURY_RENT_HOLD_RECIPIENT_ID", "rent hold (Personal Vacation Fun)")
 
 	//--- Cash Held ---
 	cashHeld := getCashHeld()
@@ -1060,17 +1126,27 @@ func main() {
 		})
 	}
 
-	if rentHoldAmount > 0 {
-		transfers = append(transfers, external.MercuryTransferRequest{
-			FromAccountID: sourceAccount.ID,
-			ToAccountID:   rentHoldAccount.ID,
-			Amount:        rentHoldAmount,
-			Note:          fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
-		})
-	}
-
 	if len(transfers) > 0 {
 		executeTransfers(mercuryClient, sourceAccount, transfers, *autoApproveTransfers)
+	}
+
+	if rentHoldAmount > 0 {
+		rentHoldTransfer := external.MercuryExternalTransferRequest{
+			FromAccountID: sourceAccount.ID,
+			RecipientID:   rentHoldRecipient.ID,
+			Amount:        rentHoldAmount,
+			Note:          fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
+			PaymentMethod: *rentHoldMethod,
+		}
+		if *rentHoldMethod == external.MercuryPaymentMethodDomesticWire {
+			rentHoldTransfer.Purpose = &external.MercurySendMoneyPurpose{
+				Simple: external.MercurySendMoneyPurposeSimple{
+					Category:       external.MercuryPurposeTransferToMyExternalAccount,
+					AdditionalInfo: fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
+				},
+			}
+		}
+		executeExternalTransfer(mercuryClient, sourceAccount, rentHoldRecipient, rentHoldTransfer, *autoApproveTransfers)
 	}
 
 	log.Debug(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
