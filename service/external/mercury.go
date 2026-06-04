@@ -43,9 +43,37 @@ type mercuryTransferPayload struct {
 }
 
 type MercuryRecipient struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	ID                    string                          `json:"id"`
+	Name                  string                          `json:"name"`
+	Status                string                          `json:"status"`
+	ElectronicRoutingInfo *MercuryRecipientRoutingInfo    `json:"electronicRoutingInfo,omitempty"`
+}
+
+type MercuryRecipientRoutingInfo struct {
+	AccountNumber string `json:"accountNumber"`
+	RoutingNumber string `json:"routingNumber"`
+	BankName      string `json:"bankName,omitempty"`
+}
+
+// AccountLast4 returns the last 4 digits of the recipient's account number,
+// or an empty string if no electronic routing info is set.
+func (r MercuryRecipient) AccountLast4() string {
+	if r.ElectronicRoutingInfo == nil {
+		return ""
+	}
+	num := r.ElectronicRoutingInfo.AccountNumber
+	if len(num) < 4 {
+		return num
+	}
+	return num[len(num)-4:]
+}
+
+// BankName returns the recipient's bank name if available.
+func (r MercuryRecipient) BankName() string {
+	if r.ElectronicRoutingInfo == nil {
+		return ""
+	}
+	return r.ElectronicRoutingInfo.BankName
 }
 
 type mercuryListRecipientsResponse struct {

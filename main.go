@@ -679,7 +679,15 @@ func pickMercuryAccount(accounts []external.MercuryAccount, label string) extern
 func pickMercuryRecipient(recipients []external.MercuryRecipient, label string) external.MercuryRecipient {
 	fmt.Printf("\nSelect %s recipient:\n", label)
 	for i, r := range recipients {
-		fmt.Printf("  %d) %s (%s)\n", i+1, r.Name, r.ID)
+		var details []string
+		if bank := r.BankName(); bank != "" {
+			details = append(details, bank)
+		}
+		if last4 := r.AccountLast4(); last4 != "" {
+			details = append(details, "••"+last4)
+		}
+		details = append(details, r.ID)
+		fmt.Printf("  %d) %s (%s)\n", i+1, r.Name, strings.Join(details, " · "))
 	}
 
 	var choice int
