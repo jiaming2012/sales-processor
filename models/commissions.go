@@ -120,11 +120,6 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 	output.WriteString(fmt.Sprintf("Sales: $%.2f * %.0f%% = $%.2f\n", s.NetSales, s.SalesCommissionPercentage*100, commission))
 	output.WriteString(fmt.Sprintf("Tips: $%.2f\n", s.Tips))
 
-	preTaxPay := basePay + commission + s.Tips
-	output.WriteString(fmt.Sprintf("\nPretax Pay: $%.2f\n", preTaxPay))
-	output.WriteString(fmt.Sprintf("Taxes: -$%.2f\n", s.Taxes))
-	output.WriteString(fmt.Sprintf("Net Pay: $%.2f\n", preTaxPay-s.Taxes))
-
 	output.WriteString("\nCash:\n")
 
 	totalCashHeld := 0.0
@@ -143,11 +138,17 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 		output.WriteString(fmt.Sprintf("Cash Left in Register: $%.2f\n", cashLeftover))
 	}
 
+	preTaxPay := basePay + commission + s.Tips
+	netPay := preTaxPay - s.Taxes
+	output.WriteString(fmt.Sprintf("\nPretax Pay: $%.2f\n", preTaxPay))
+	output.WriteString(fmt.Sprintf("Taxes: -$%.2f\n", s.Taxes))
+	output.WriteString(fmt.Sprintf("Net Pay: $%.2f\n", netPay))
+
 	if s.RentHold > 0 {
 		output.WriteString(fmt.Sprintf("\nRent Hold: -$%.2f\n", s.RentHold))
 	}
 
-	output.WriteString(fmt.Sprintf("\nDeposit: $%.2f\n", commission+s.Tips-s.Taxes-totalCashHeld-s.RentHold))
+	output.WriteString(fmt.Sprintf("\nDeposit: $%.2f\n", netPay-s.RentHold))
 
 	return output.String()
 }
