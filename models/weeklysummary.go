@@ -44,6 +44,15 @@ func (s *WeeklySummary) TotalHourlyWorkersExpense() float64 {
 	return totalComp + totalPayrollTaxes
 }
 
+func formatHourlyWageLines(name string, hours, rate, wage, tips, employerTaxes float64) string {
+	takeHome := wage + tips
+	totalCost := takeHome + employerTaxes
+	return fmt.Sprintf(
+		"%s\n  Take-home pay: %.2f hours @ $%.2f/hr + $%.2f tips = $%.2f\n  Employer taxes: $%.2f\n  Total cost to business: $%.2f\n",
+		name, hours, rate, tips, takeHome, employerTaxes, totalCost,
+	)
+}
+
 func (s *WeeklySummary) Show() string {
 	output := strings.Builder{}
 	wageOutput := strings.Builder{}
@@ -53,9 +62,8 @@ func (s *WeeklySummary) Show() string {
 	for _, employeeHours := range s.Hours {
 		wage := employeeHours.Hours * employeeHours.Employee.Rate
 		tips := s.Tips.Details[employeeHours.Employee.Employee()]
-		totalComp := wage + tips
 		payrollTaxes := wage * 0.106
-		wageOutput.WriteString(fmt.Sprintf("%v: %.2f hours @ $%.2f/hr = $%.2f + $%.2f tips + $%.2f employer taxes = $%.2f total cost\n", employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes, totalComp+payrollTaxes))
+		wageOutput.WriteString(formatHourlyWageLines(employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes))
 		wageOutput.WriteString("\n")
 		wages += wage
 
@@ -78,9 +86,8 @@ func (s *WeeklySummary) Show() string {
 	for _, employeeHours := range s.PreviousHours {
 		wage := employeeHours.Hours * employeeHours.Employee.Rate
 		tips := s.Tips.Details[employeeHours.Employee.Employee()]
-		totalComp := wage + tips
 		payrollTaxes := wage * 0.106
-		wageOutput.WriteString(fmt.Sprintf("%v: %.2f hours @ $%.2f/hr = $%.2f + $%.2f tips + $%.2f employer taxes = $%.2f total cost\n", employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes, totalComp+payrollTaxes))
+		wageOutput.WriteString(formatHourlyWageLines(employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes))
 		wageOutput.WriteString("\n")
 		previousWages += wage
 
@@ -91,16 +98,21 @@ func (s *WeeklySummary) Show() string {
 
 	output.WriteString("Summary\n")
 	output.WriteString("-----------------------\n")
-	output.WriteString(fmt.Sprintf("Wages: $%.2f\n", wages))
-	output.WriteString(fmt.Sprintf("Previous Wages: $%.2f\n", previousWages))
-	output.WriteString(fmt.Sprintf("Payroll Taxes: $%.2f\n", totalPayrollTaxes))
-	output.WriteString(fmt.Sprintf("Total Employee Costs: $%.2f\n", employeeCosts))
-	output.WriteString(fmt.Sprintf("Net Sales: $%.2f\n", s.Sales))
-	output.WriteString(fmt.Sprintf("Cash Tendered: $%.2f\n", s.CashTendered))
-	output.WriteString(fmt.Sprintf("Credit Card Fees: $%.2f\n", s.CCFees))
-	output.WriteString(fmt.Sprintf("Employee Costs as a Percentage of Sales: %%%.0f\n", (employeeCosts/s.Sales)*100.0))
-	output.WriteString(fmt.Sprintf("Tips: $%.2f\n", s.Tips.Total))
-	output.WriteString(fmt.Sprintf("Sales Tax: $%.2f\n", s.SalesTax))
+
+	output.WriteString("Sales\n")
+	output.WriteString(fmt.Sprintf("  Net Sales:        $%.2f\n", s.Sales))
+	output.WriteString(fmt.Sprintf("  Tips:             $%.2f\n", s.Tips.Total))
+	output.WriteString(fmt.Sprintf("  Sales Tax:        $%.2f\n", s.SalesTax))
+	output.WriteString(fmt.Sprintf("  Cash Tendered:    $%.2f\n", s.CashTendered))
+	output.WriteString(fmt.Sprintf("  Credit Card Fees: $%.2f\n", s.CCFees))
+	output.WriteString("\n")
+
+	output.WriteString("Labor\n")
+	output.WriteString(fmt.Sprintf("  Wages:                  $%.2f\n", wages))
+	output.WriteString(fmt.Sprintf("  Previous Wages:         $%.2f\n", previousWages))
+	output.WriteString(fmt.Sprintf("  Payroll Taxes:          $%.2f\n", totalPayrollTaxes))
+	output.WriteString(fmt.Sprintf("  Total Employee Costs:   $%.2f\n", employeeCosts))
+	output.WriteString(fmt.Sprintf("  Employee Costs / Sales: %.0f%%\n", (employeeCosts/s.Sales)*100.0))
 	output.WriteString("\n")
 	output.WriteString("\n")
 
