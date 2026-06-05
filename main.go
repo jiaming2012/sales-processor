@@ -1428,8 +1428,8 @@ func main() {
 
 func writePDF(report string, fromDate string, toDate string) string {
 	const (
-		bodyFontSize    = 12.0
-		headingFontSize = 20.0
+		bodyFontSize    = 18.0
+		headingFontSize = 30.0
 		bodyFontFamily  = "Helvetica"
 	)
 
@@ -1437,8 +1437,8 @@ func writePDF(report string, fromDate string, toDate string) string {
 	pdf.AddPage()
 
 	pdf.SetFont(bodyFontFamily, "B", headingFontSize)
-	pdf.MultiCell(0, 10, fmt.Sprintf("Sales Report for %s - %s", fromDate, toDate), "", "", false)
-	pdf.Ln(4)
+	pdf.MultiCell(0, 15, fmt.Sprintf("Sales Report for %s - %s", fromDate, toDate), "", "", false)
+	pdf.Ln(6)
 
 	renderReport(pdf, report, bodyFontFamily, bodyFontSize, headingFontSize)
 
@@ -1466,8 +1466,8 @@ func renderReport(pdf *fpdf.Fpdf, report string, family string, bodyFontSize, he
 		// Heading: text line followed by a dashes line.
 		if i+1 < len(lines) && trimmed != "" && isDashLine(lines[i+1]) {
 			pdf.SetFont(family, "B", headingFontSize)
-			pdf.MultiCell(0, 11, trimmed, "", "L", false)
-			pdf.Ln(2)
+			pdf.MultiCell(0, 16, trimmed, "", "L", false)
+			pdf.Ln(3)
 			i += 2
 			continue
 		}
@@ -1488,7 +1488,7 @@ func renderReport(pdf *fpdf.Fpdf, report string, family string, bodyFontSize, he
 
 		// Blank line outside a table block: small vertical spacer.
 		if trimmed == "" {
-			pdf.Ln(3)
+			pdf.Ln(4)
 			i++
 			continue
 		}
@@ -1496,11 +1496,11 @@ func renderReport(pdf *fpdf.Fpdf, report string, family string, bodyFontSize, he
 		// Sub-heading (non-indented standalone label, often introduces a table block).
 		if !startsWithSpaces(line) {
 			pdf.SetFont(family, "B", bodyFontSize)
-			pdf.MultiCell(0, 7, trimmed, "", "L", false)
+			pdf.MultiCell(0, 10, trimmed, "", "L", false)
 			pdf.Ln(1)
 		} else {
 			pdf.SetFont(family, "", bodyFontSize)
-			pdf.MultiCell(0, 7, line, "", "L", false)
+			pdf.MultiCell(0, 10, line, "", "L", false)
 		}
 		i++
 	}
@@ -1578,10 +1578,10 @@ func renderPdfTableBlock(pdf *fpdf.Fpdf, rows []pdfTableRow, family string, body
 	pdf.SetFont(family, "", bodyFontSize)
 
 	const (
-		indentStep    = 1.5  // mm per leading space
-		labelPadRight = 4.0  // mm gap between label and value columns
-		rowHeight     = 7.0
-		gapHeight     = 3.0
+		indentStep    = 2.25 // mm per leading space
+		labelPadRight = 6.0  // mm gap between label and value columns
+		rowHeight     = 10.5
+		gapHeight     = 4.5
 	)
 
 	// Auto-fit label column to the widest label (including its indent) in this block.
