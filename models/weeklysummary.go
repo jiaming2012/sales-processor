@@ -57,7 +57,8 @@ func formatHourlyWageLines(name string, hours, rate, wage, tips, employerTaxes f
 
 func (s *WeeklySummary) Show() string {
 	output := strings.Builder{}
-	wageOutput := strings.Builder{}
+	currentWageOutput := strings.Builder{}
+	previousWageOutput := strings.Builder{}
 
 	wages := 0.0
 	totalPayrollTaxes := 0.0
@@ -65,8 +66,8 @@ func (s *WeeklySummary) Show() string {
 		wage := employeeHours.Hours * employeeHours.Employee.Rate
 		tips := s.Tips.Details[employeeHours.Employee.Employee()]
 		payrollTaxes := wage * 0.106
-		wageOutput.WriteString(formatHourlyWageLines(employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes))
-		wageOutput.WriteString("\n")
+		currentWageOutput.WriteString(formatHourlyWageLines(employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes))
+		currentWageOutput.WriteString("\n")
 		wages += wage
 
 		totalPayrollTaxes += payrollTaxes
@@ -74,23 +75,21 @@ func (s *WeeklySummary) Show() string {
 
 	for _, cashEmployee := range s.CashEmployeesPay {
 		totalComp := cashEmployee.NetPay + cashEmployee.Taxes
-		wageOutput.WriteString(fmt.Sprintf("%v: $%.2f pay + $%.2f taxes = $%.2f total cost\n", cashEmployee.Name, cashEmployee.NetPay, cashEmployee.Taxes, totalComp))
-		wageOutput.WriteString("\n")
+		currentWageOutput.WriteString(fmt.Sprintf("%v: $%.2f pay + $%.2f taxes = $%.2f total cost\n", cashEmployee.Name, cashEmployee.NetPay, cashEmployee.Taxes, totalComp))
+		currentWageOutput.WriteString("\n")
 		wages += totalComp
 
 		totalPayrollTaxes += cashEmployee.Taxes
 	}
 
-	// -------
-	wageOutput.WriteString("----------------------------\nPrevious Hours:\n")
 	previousWages := 0.0
 	previousTotalPayrollTaxes := 0.0
 	for _, employeeHours := range s.PreviousHours {
 		wage := employeeHours.Hours * employeeHours.Employee.Rate
 		tips := s.Tips.Details[employeeHours.Employee.Employee()]
 		payrollTaxes := wage * 0.106
-		wageOutput.WriteString(formatHourlyWageLines(employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes))
-		wageOutput.WriteString("\n")
+		previousWageOutput.WriteString(formatHourlyWageLines(employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes))
+		previousWageOutput.WriteString("\n")
 		previousWages += wage
 
 		previousTotalPayrollTaxes += payrollTaxes
@@ -127,9 +126,16 @@ func (s *WeeklySummary) Show() string {
 	output.WriteString("\n")
 	output.WriteString("\n")
 
-	output.WriteString("Wages Breakdown\n")
+	output.WriteString("This Week's Hours\n")
 	output.WriteString("-----------------------\n")
-	output.WriteString(wageOutput.String())
+	output.WriteString("\n")
+	output.WriteString(currentWageOutput.String())
+	output.WriteString("\n")
+
+	output.WriteString("Previous Week's Hours\n")
+	output.WriteString("-----------------------\n")
+	output.WriteString("\n")
+	output.WriteString(previousWageOutput.String())
 
 	return output.String()
 }
