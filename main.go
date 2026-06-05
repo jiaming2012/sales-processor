@@ -1420,14 +1420,14 @@ func writePDF(report string, fromDate string, toDate string) string {
 	pdf.MultiCell(0, 10, fmt.Sprintf("Sales Report for %s - %s", fromDate, toDate), "", "", false)
 	pdf.Ln(4)
 
-	pdf.SetFont("Helvetica", "", bodyFontSize)
+	pdf.SetFont("Courier", "", bodyFontSize)
 
 	lines := strings.Split(report, "\n")
 	flushBody := func(buf *strings.Builder) {
 		if buf.Len() == 0 {
 			return
 		}
-		pdf.SetFont("Helvetica", "", bodyFontSize)
+		pdf.SetFont("Courier", "", bodyFontSize)
 		pdf.MultiCell(0, 10, buf.String(), "", "", false)
 		buf.Reset()
 	}
