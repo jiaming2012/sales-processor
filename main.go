@@ -1459,15 +1459,16 @@ func writePDF(report string, fromDate string, toDate string) string {
 	const (
 		bodyFontSize    = 18.0
 		headingFontSize = 30.0
+		titleFontSize   = 24.0
 		bodyFontFamily  = "Helvetica"
 	)
 
 	pdf := fpdf.New("P", "mm", "A4", "")
 	pdf.AddPage()
 
-	pdf.SetFont(bodyFontFamily, "B", headingFontSize)
-	pdf.MultiCell(0, 15, fmt.Sprintf("Sales Report for %s - %s", fromDate, toDate), "", "", false)
-	pdf.Ln(6)
+	pdf.SetFont(bodyFontFamily, "B", titleFontSize)
+	pdf.MultiCell(0, 12, fmt.Sprintf("Sales Report for %s - %s", fromDate, toDate), "", "", false)
+	pdf.Ln(5)
 
 	renderReport(pdf, report, bodyFontFamily, bodyFontSize, headingFontSize)
 
