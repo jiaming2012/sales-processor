@@ -28,11 +28,12 @@ type mercuryListAccountsResponse struct {
 }
 
 type MercuryTransferRequest struct {
-	FromAccountID string
-	ToAccountID   string
-	ToAccountName string // display only — not sent to Mercury
-	Amount        float64
-	Note          string
+	FromAccountID  string
+	ToAccountID    string
+	ToAccountName  string // display only — not sent to Mercury
+	Amount         float64
+	Note           string
+	IdempotencyKey string // if empty, one is generated
 }
 
 type mercuryTransferPayload struct {
@@ -132,12 +133,13 @@ type MercurySendMoneyPurpose struct {
 }
 
 type MercuryExternalTransferRequest struct {
-	FromAccountID string
-	RecipientID   string
-	Amount        float64
-	Note          string
-	PaymentMethod string                   // "ach" or "domesticWire"
-	Purpose       *MercurySendMoneyPurpose // required when PaymentMethod is "domesticWire"
+	FromAccountID  string
+	RecipientID    string
+	Amount         float64
+	Note           string
+	PaymentMethod  string                   // "ach" or "domesticWire"
+	Purpose        *MercurySendMoneyPurpose // required when PaymentMethod is "domesticWire"
+	IdempotencyKey string                   // if empty, one is generated
 }
 
 type mercuryExternalTransferPayload struct {
@@ -207,7 +209,10 @@ func (c *MercuryClient) ListAccounts() ([]MercuryAccount, error) {
 }
 
 func (c *MercuryClient) CreateInternalTransfer(transfer MercuryTransferRequest) error {
-	idempotencyKey := fmt.Sprintf("%s-%s-%.2f-%d", transfer.FromAccountID, transfer.ToAccountID, transfer.Amount, time.Now().UnixNano())
+	idempotencyKey := transfer.IdempotencyKey
+	if idempotencyKey == "" {
+		idempotencyKey = fmt.Sprintf("%s-%s-%.2f-%d", transfer.FromAccountID, transfer.ToAccountID, transfer.Amount, time.Now().UnixNano())
+	}
 
 	payload := mercuryTransferPayload{
 		SourceAccountID:    transfer.FromAccountID,
@@ -286,7 +291,10 @@ func (c *MercuryClient) CreateExternalTransfer(transfer MercuryExternalTransferR
 		return fmt.Errorf("mercury CreateExternalTransfer: purpose is required for domesticWire transfers")
 	}
 
-	idempotencyKey := fmt.Sprintf("%s-%s-%.2f-%d", transfer.FromAccountID, transfer.RecipientID, transfer.Amount, time.Now().UnixNano())
+	idempotencyKey := transfer.IdempotencyKey
+	if idempotencyKey == "" {
+		idempotencyKey = fmt.Sprintf("%s-%s-%.2f-%d", transfer.FromAccountID, transfer.RecipientID, transfer.Amount, time.Now().UnixNano())
+	}
 
 	payload := mercuryExternalTransferPayload{
 		RecipientID:    transfer.RecipientID,

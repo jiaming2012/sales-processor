@@ -26,6 +26,7 @@ import (
 	"jiaming2012/sales-processor/payroll"
 	"jiaming2012/sales-processor/service"
 	"jiaming2012/sales-processor/service/external"
+	"jiaming2012/sales-processor/service/transferledger"
 	"jiaming2012/sales-processor/sftp"
 )
 
@@ -706,7 +707,40 @@ func pickMercuryRecipient(recipients []external.MercuryRecipient, label string) 
 	return recipients[choice-1]
 }
 
-func executeTransfers(mercuryClient *external.MercuryClient, sourceAccount external.MercuryAccount, transfers []external.MercuryTransferRequest, autoApprove bool) {
+type transferOutcome struct {
+	Attempted bool
+	Sent      bool
+	Err       error
+}
+
+func recordOutcome(ledger *transferledger.Ledger, kind transferledger.Kind, amount float64, method, destination, idempotencyKey string, outcome transferOutcome) {
+	if !outcome.Attempted {
+		return
+	}
+	entry := transferledger.Entry{
+		Amount:         amount,
+		Method:         method,
+		Destination:    destination,
+		SentAt:         time.Now().UTC(),
+		IdempotencyKey: idempotencyKey,
+	}
+	if outcome.Sent {
+		entry.Status = transferledger.StatusSent
+	} else {
+		entry.Status = transferledger.StatusFailed
+		if outcome.Err != nil {
+			entry.Error = outcome.Err.Error()
+		}
+	}
+	ledger.Record(kind, entry)
+}
+
+func executeTransfers(mercuryClient *external.MercuryClient, sourceAccount external.MercuryAccount, transfers []external.MercuryTransferRequest, autoApprove bool) []transferOutcome {
+	outcomes := make([]transferOutcome, len(transfers))
+	if len(transfers) == 0 {
+		return outcomes
+	}
+
 	fmt.Println("\n--- Pending Transfers ---")
 	for _, t := range transfers {
 		dest := t.ToAccountName
@@ -723,17 +757,20 @@ func executeTransfers(mercuryClient *external.MercuryClient, sourceAccount exter
 
 		if strings.ToLower(answer) != "y" {
 			fmt.Println("Transfers skipped.")
-			return
+			return outcomes
 		}
 	}
 
-	for _, t := range transfers {
-		if err := mercuryClient.CreateInternalTransfer(t); err != nil {
+	for i, t := range transfers {
+		err := mercuryClient.CreateInternalTransfer(t)
+		outcomes[i] = transferOutcome{Attempted: true, Sent: err == nil, Err: err}
+		if err != nil {
 			log.Errorf("transfer failed (%s): %v", t.Note, err)
 		} else {
 			fmt.Printf("  Transferred $%.2f → %s\n", t.Amount, t.Note)
 		}
 	}
+	return outcomes
 }
 
 func saveEnvVar(envVar string, value string) {
@@ -868,7 +905,7 @@ func formatRecipientDest(recipient external.MercuryRecipient) string {
 	return fmt.Sprintf("%s · %s", recipient.Name, strings.Join(details, " "))
 }
 
-func executeExternalTransfer(mercuryClient *external.MercuryClient, sourceAccount external.MercuryAccount, recipient external.MercuryRecipient, transfer external.MercuryExternalTransferRequest, autoApprove bool) {
+func executeExternalTransfer(mercuryClient *external.MercuryClient, sourceAccount external.MercuryAccount, recipient external.MercuryRecipient, transfer external.MercuryExternalTransferRequest, autoApprove bool) transferOutcome {
 	dest := formatRecipientDest(recipient)
 	fmt.Println("\n--- Pending External Transfer ---")
 	fmt.Printf("  $%.2f from %s → %s [%s] (%s)\n", transfer.Amount, sourceAccount.Name, dest, transfer.PaymentMethod, transfer.Note)
@@ -880,21 +917,34 @@ func executeExternalTransfer(mercuryClient *external.MercuryClient, sourceAccoun
 
 		if strings.ToLower(answer) != "y" {
 			fmt.Println("External transfer skipped.")
-			return
+			return transferOutcome{}
 		}
 	}
 
-	if err := mercuryClient.CreateExternalTransfer(transfer); err != nil {
+	err := mercuryClient.CreateExternalTransfer(transfer)
+	out := transferOutcome{Attempted: true, Sent: err == nil, Err: err}
+	if err != nil {
 		log.Errorf("external transfer failed (%s): %v", transfer.Note, err)
-		return
+		return out
 	}
 	fmt.Printf("  Transferred $%.2f → %s [%s]\n", transfer.Amount, dest, transfer.PaymentMethod)
+	return out
 }
 
 func main() {
 	autoApproveTransfers := flag.Bool("auto-approve-transfers", false, "automatically approve Mercury transfers without prompting")
 	mercurySandbox := flag.Bool("sandbox", false, "use Mercury sandbox environment")
+	forceResend := flag.String("force-resend", "", "comma-separated transfer kinds to force re-send (sales_tax, deferred_taxes, rent_hold, all)")
 	flag.Parse()
+
+	forcedKinds, err := transferledger.ParseKinds(*forceResend)
+	if err != nil {
+		log.Fatalf("--force-resend: %v", err)
+	}
+	forcedSet := map[transferledger.Kind]bool{}
+	for _, k := range forcedKinds {
+		forcedSet[k] = true
+	}
 
 	if *mercurySandbox {
 		godotenv.Load(".env.sandbox")
@@ -1206,47 +1256,98 @@ func main() {
 		payrollTaxes += employee.Taxes
 	}
 
-	var transfers []external.MercuryTransferRequest
-	if weeklySummary.SalesTax > 0 {
-		transfers = append(transfers, external.MercuryTransferRequest{
-			FromAccountID: sourceAccount.ID,
-			ToAccountID:   salesTaxAccount.ID,
-			ToAccountName: salesTaxAccount.Name,
-			Amount:        weeklySummary.SalesTax,
-			Note:          fmt.Sprintf("Sales tax %s - %s", fromDate, toDate),
-		})
+	ledger, err := transferledger.Load("output/transfers", toDate)
+	if err != nil {
+		log.Fatalf("load transfer ledger: %v", err)
 	}
-	if payrollTaxes > 0 {
-		transfers = append(transfers, external.MercuryTransferRequest{
-			FromAccountID: sourceAccount.ID,
-			ToAccountID:   deferredTaxAccount.ID,
-			ToAccountName: deferredTaxAccount.Name,
-			Amount:        payrollTaxes,
-			Note:          fmt.Sprintf("Deferred taxes %s - %s", fromDate, toDate),
-		})
+	if len(forcedKinds) > 0 {
+		ledger.Clear(forcedKinds...)
+		log.Infof("--force-resend cleared ledger entries: %v", forcedKinds)
 	}
 
-	if len(transfers) > 0 {
-		executeTransfers(mercuryClient, sourceAccount, transfers, *autoApproveTransfers)
+	logSkipped := func(kind transferledger.Kind, e transferledger.Entry) {
+		fmt.Printf("[skipped] %s already sent on %s ($%.2f → %s) — use --force-resend=%s to re-send\n",
+			kind, e.SentAt.Format("2006-01-02"), e.Amount, e.Destination, kind)
+	}
+
+	type plannedInternal struct {
+		kind    transferledger.Kind
+		request external.MercuryTransferRequest
+	}
+	var planned []plannedInternal
+	if weeklySummary.SalesTax > 0 {
+		if e, sent := ledger.Sent(transferledger.KindSalesTax); sent {
+			logSkipped(transferledger.KindSalesTax, e)
+		} else {
+			planned = append(planned, plannedInternal{
+				kind: transferledger.KindSalesTax,
+				request: external.MercuryTransferRequest{
+					FromAccountID:  sourceAccount.ID,
+					ToAccountID:    salesTaxAccount.ID,
+					ToAccountName:  salesTaxAccount.Name,
+					Amount:         weeklySummary.SalesTax,
+					Note:           fmt.Sprintf("Sales tax %s - %s", fromDate, toDate),
+					IdempotencyKey: transferledger.IdempotencyKey(toDate, transferledger.KindSalesTax, forcedSet[transferledger.KindSalesTax]),
+				},
+			})
+		}
+	}
+	if payrollTaxes > 0 {
+		if e, sent := ledger.Sent(transferledger.KindDeferredTaxes); sent {
+			logSkipped(transferledger.KindDeferredTaxes, e)
+		} else {
+			planned = append(planned, plannedInternal{
+				kind: transferledger.KindDeferredTaxes,
+				request: external.MercuryTransferRequest{
+					FromAccountID:  sourceAccount.ID,
+					ToAccountID:    deferredTaxAccount.ID,
+					ToAccountName:  deferredTaxAccount.Name,
+					Amount:         payrollTaxes,
+					Note:           fmt.Sprintf("Deferred taxes %s - %s", fromDate, toDate),
+					IdempotencyKey: transferledger.IdempotencyKey(toDate, transferledger.KindDeferredTaxes, forcedSet[transferledger.KindDeferredTaxes]),
+				},
+			})
+		}
+	}
+
+	if len(planned) > 0 {
+		requests := make([]external.MercuryTransferRequest, len(planned))
+		for i, p := range planned {
+			requests[i] = p.request
+		}
+		outcomes := executeTransfers(mercuryClient, sourceAccount, requests, *autoApproveTransfers)
+		for i, p := range planned {
+			recordOutcome(ledger, p.kind, p.request.Amount, "internal", p.request.ToAccountName, p.request.IdempotencyKey, outcomes[i])
+		}
 	}
 
 	if rentHoldAmount > 0 {
-		rentHoldTransfer := external.MercuryExternalTransferRequest{
-			FromAccountID: sourceAccount.ID,
-			RecipientID:   rentHoldRecipient.ID,
-			Amount:        rentHoldAmount,
-			Note:          fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
-			PaymentMethod: rentHoldMethod,
-		}
-		if rentHoldMethod == external.MercuryPaymentMethodDomesticWire {
-			rentHoldTransfer.Purpose = &external.MercurySendMoneyPurpose{
-				Simple: external.MercurySendMoneyPurposeSimple{
-					Category:       external.MercuryPurposeTransferToMyExternalAccount,
-					AdditionalInfo: fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
-				},
+		if e, sent := ledger.Sent(transferledger.KindRentHold); sent {
+			logSkipped(transferledger.KindRentHold, e)
+		} else {
+			rentHoldTransfer := external.MercuryExternalTransferRequest{
+				FromAccountID:  sourceAccount.ID,
+				RecipientID:    rentHoldRecipient.ID,
+				Amount:         rentHoldAmount,
+				Note:           fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
+				PaymentMethod:  rentHoldMethod,
+				IdempotencyKey: transferledger.IdempotencyKey(toDate, transferledger.KindRentHold, forcedSet[transferledger.KindRentHold]),
 			}
+			if rentHoldMethod == external.MercuryPaymentMethodDomesticWire {
+				rentHoldTransfer.Purpose = &external.MercurySendMoneyPurpose{
+					Simple: external.MercurySendMoneyPurposeSimple{
+						Category:       external.MercuryPurposeTransferToMyExternalAccount,
+						AdditionalInfo: fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
+					},
+				}
+			}
+			outcome := executeExternalTransfer(mercuryClient, sourceAccount, rentHoldRecipient, rentHoldTransfer, *autoApproveTransfers)
+			recordOutcome(ledger, transferledger.KindRentHold, rentHoldAmount, rentHoldMethod, formatRecipientDest(rentHoldRecipient), rentHoldTransfer.IdempotencyKey, outcome)
 		}
-		executeExternalTransfer(mercuryClient, sourceAccount, rentHoldRecipient, rentHoldTransfer, *autoApproveTransfers)
+	}
+
+	if err := ledger.Save(); err != nil {
+		log.Errorf("save transfer ledger: %v", err)
 	}
 
 	log.Debug(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
