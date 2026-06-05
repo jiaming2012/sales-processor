@@ -110,8 +110,8 @@ func (s *WeeklySummary) Show() string {
 	output.WriteString("\n")
 
 	output.WriteString("Labor\n")
-	output.WriteString(fmt.Sprintf("  Wages:                  $%.2f\n", wages))
-	output.WriteString(fmt.Sprintf("  Previous Wages:         $%.2f\n", previousWages))
+	output.WriteString(fmt.Sprintf("  This Week's Wages:      $%.2f\n", wages))
+	output.WriteString(fmt.Sprintf("  Previous Week's Wages:  $%.2f\n", previousWages))
 	output.WriteString(fmt.Sprintf("  Payroll Taxes:          $%.2f\n", totalPayrollTaxes))
 	output.WriteString(fmt.Sprintf("  Total Employee Costs:   $%.2f\n", employeeCosts))
 	output.WriteString(fmt.Sprintf("  Employee Costs / Sales: %.0f%%\n", (employeeCosts/s.Sales)*100.0))
