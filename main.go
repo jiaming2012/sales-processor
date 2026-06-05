@@ -957,37 +957,31 @@ func main() {
 		log.Fatalf("failed to list Mercury recipients: %v", err)
 	}
 
-	// Rent hold can be sent via ACH or wire (see --rent-hold-method), so the
-	// recipient must have both routing types configured in Mercury.
-	var dualMethodRecipients []external.MercuryRecipient
+	// Show all recipients with any routing info — including wire-only or ACH-only.
+	var routableRecipients []external.MercuryRecipient
 	for _, r := range mercuryRecipients {
-		if r.ElectronicRoutingInfo != nil && r.DomesticWireRoutingInfo != nil {
-			dualMethodRecipients = append(dualMethodRecipients, r)
+		if r.ElectronicRoutingInfo != nil || r.DomesticWireRoutingInfo != nil {
+			routableRecipients = append(routableRecipients, r)
 		}
 	}
 
-	if id := os.Getenv("MERCURY_RENT_HOLD_RECIPIENT_ID"); id != "" {
-		dualMethod := false
-		for _, r := range dualMethodRecipients {
-			if r.ID == id {
-				dualMethod = true
-				break
-			}
-		}
-		if !dualMethod {
-			for _, r := range mercuryRecipients {
-				if r.ID == id {
-					log.Fatalf("MERCURY_RENT_HOLD_RECIPIENT_ID=%s (%s) supports only %s — rent hold recipients must have both ACH and domestic wire routing configured in Mercury", id, r.Name, r.SupportedMethods())
-				}
-			}
-		}
+	if len(routableRecipients) == 0 {
+		log.Fatalf("no Mercury recipients have ACH or domestic wire routing configured")
 	}
 
-	if len(dualMethodRecipients) == 0 {
-		log.Fatalf("no Mercury recipients support both ACH and domestic wire — add ACH and wire routing to the rent hold recipient in Mercury")
-	}
+	rentHoldRecipient := resolveMercuryRecipient(routableRecipients, "MERCURY_RENT_HOLD_RECIPIENT_ID", "rent hold (Personal Vacation Fun)")
 
-	rentHoldRecipient := resolveMercuryRecipient(dualMethodRecipients, "MERCURY_RENT_HOLD_RECIPIENT_ID", "rent hold (Personal Vacation Fun)")
+	// Verify the chosen method is supported by the recipient before we get to transfer time.
+	switch *rentHoldMethod {
+	case external.MercuryPaymentMethodACH:
+		if rentHoldRecipient.ElectronicRoutingInfo == nil {
+			log.Fatalf("rent hold recipient %s (%s) does not support ACH — re-run with --rent-hold-method=%s", rentHoldRecipient.Name, rentHoldRecipient.ID, external.MercuryPaymentMethodDomesticWire)
+		}
+	case external.MercuryPaymentMethodDomesticWire:
+		if rentHoldRecipient.DomesticWireRoutingInfo == nil {
+			log.Fatalf("rent hold recipient %s (%s) does not support domestic wire — re-run with --rent-hold-method=%s", rentHoldRecipient.Name, rentHoldRecipient.ID, external.MercuryPaymentMethodACH)
+		}
+	}
 
 	//--- Cash Held ---
 	cashHeld := getCashHeld()
