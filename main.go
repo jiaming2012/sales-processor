@@ -709,7 +709,11 @@ func pickMercuryRecipient(recipients []external.MercuryRecipient, label string) 
 func executeTransfers(mercuryClient *external.MercuryClient, sourceAccount external.MercuryAccount, transfers []external.MercuryTransferRequest, autoApprove bool) {
 	fmt.Println("\n--- Pending Transfers ---")
 	for _, t := range transfers {
-		fmt.Printf("  $%.2f from %s → %s (%s)\n", t.Amount, sourceAccount.Name, t.Note, t.ToAccountID)
+		dest := t.ToAccountName
+		if dest == "" {
+			dest = t.ToAccountID
+		}
+		fmt.Printf("  $%.2f from %s → %s (%s)\n", t.Amount, sourceAccount.Name, dest, t.Note)
 	}
 
 	if !autoApprove {
@@ -850,9 +854,24 @@ func resolveMercuryRecipient(recipients []external.MercuryRecipient, envVar stri
 	return r
 }
 
+func formatRecipientDest(recipient external.MercuryRecipient) string {
+	var details []string
+	if bank := recipient.BankName(); bank != "" {
+		details = append(details, bank)
+	}
+	if last4 := recipient.AccountLast4(); last4 != "" {
+		details = append(details, "••"+last4)
+	}
+	if len(details) == 0 {
+		return recipient.Name
+	}
+	return fmt.Sprintf("%s · %s", recipient.Name, strings.Join(details, " "))
+}
+
 func executeExternalTransfer(mercuryClient *external.MercuryClient, sourceAccount external.MercuryAccount, recipient external.MercuryRecipient, transfer external.MercuryExternalTransferRequest, autoApprove bool) {
+	dest := formatRecipientDest(recipient)
 	fmt.Println("\n--- Pending External Transfer ---")
-	fmt.Printf("  $%.2f from %s → %s (%s, %s)\n", transfer.Amount, sourceAccount.Name, recipient.Name, transfer.PaymentMethod, transfer.Note)
+	fmt.Printf("  $%.2f from %s → %s [%s] (%s)\n", transfer.Amount, sourceAccount.Name, dest, transfer.PaymentMethod, transfer.Note)
 
 	if !autoApprove {
 		fmt.Print("\nExecute external transfer? (y/n): ")
@@ -869,7 +888,7 @@ func executeExternalTransfer(mercuryClient *external.MercuryClient, sourceAccoun
 		log.Errorf("external transfer failed (%s): %v", transfer.Note, err)
 		return
 	}
-	fmt.Printf("  Transferred $%.2f → %s (%s)\n", transfer.Amount, recipient.Name, transfer.PaymentMethod)
+	fmt.Printf("  Transferred $%.2f → %s [%s]\n", transfer.Amount, dest, transfer.PaymentMethod)
 }
 
 func main() {
@@ -1191,6 +1210,7 @@ func main() {
 		transfers = append(transfers, external.MercuryTransferRequest{
 			FromAccountID: sourceAccount.ID,
 			ToAccountID:   salesTaxAccount.ID,
+			ToAccountName: salesTaxAccount.Name,
 			Amount:        weeklySummary.SalesTax,
 			Note:          fmt.Sprintf("Sales tax %s - %s", fromDate, toDate),
 		})
@@ -1199,6 +1219,7 @@ func main() {
 		transfers = append(transfers, external.MercuryTransferRequest{
 			FromAccountID: sourceAccount.ID,
 			ToAccountID:   deferredTaxAccount.ID,
+			ToAccountName: deferredTaxAccount.Name,
 			Amount:        payrollTaxes,
 			Note:          fmt.Sprintf("Deferred taxes %s - %s", fromDate, toDate),
 		})

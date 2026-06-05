@@ -30,6 +30,7 @@ type mercuryListAccountsResponse struct {
 type MercuryTransferRequest struct {
 	FromAccountID string
 	ToAccountID   string
+	ToAccountName string // display only — not sent to Mercury
 	Amount        float64
 	Note          string
 }
