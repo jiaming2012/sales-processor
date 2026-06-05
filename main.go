@@ -1162,7 +1162,7 @@ func main() {
 		}
 
 		// todo: cash held should be broken down by employee
-		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(previousDates[0], previousDates[len(previousDates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld, weeklySummary.CashTendered, rentHoldAmount, 0.20)
+		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(previousDates[0], previousDates[len(previousDates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld, weeklySummary.CashTendered, rentHoldAmount, defaultEmployeeTaxRate)
 
 		// todo: make employee conversion less janky
 		if empl.Name == "Latanya Mcgriff" {
