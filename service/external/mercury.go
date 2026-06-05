@@ -43,10 +43,12 @@ type mercuryTransferPayload struct {
 }
 
 type MercuryRecipient struct {
-	ID                    string                          `json:"id"`
-	Name                  string                          `json:"name"`
-	Status                string                          `json:"status"`
-	ElectronicRoutingInfo *MercuryRecipientRoutingInfo    `json:"electronicRoutingInfo,omitempty"`
+	ID                      string                       `json:"id"`
+	Name                    string                       `json:"name"`
+	Status                  string                       `json:"status"`
+	DefaultPaymentMethod    string                       `json:"defaultPaymentMethod,omitempty"`
+	ElectronicRoutingInfo   *MercuryRecipientRoutingInfo `json:"electronicRoutingInfo,omitempty"`
+	DomesticWireRoutingInfo *MercuryRecipientRoutingInfo `json:"domesticWireRoutingInfo,omitempty"`
 }
 
 type MercuryRecipientRoutingInfo struct {
@@ -55,13 +57,24 @@ type MercuryRecipientRoutingInfo struct {
 	BankName      string `json:"bankName,omitempty"`
 }
 
-// AccountLast4 returns the last 4 digits of the recipient's account number,
-// or an empty string if no electronic routing info is set.
+// preferredRoutingInfo returns the recipient's electronic (ACH) routing info if
+// present, falling back to domestic wire routing info. Used purely for display
+// — the actual payment method is chosen separately.
+func (r MercuryRecipient) preferredRoutingInfo() *MercuryRecipientRoutingInfo {
+	if r.ElectronicRoutingInfo != nil {
+		return r.ElectronicRoutingInfo
+	}
+	return r.DomesticWireRoutingInfo
+}
+
+// AccountLast4 returns the last 4 digits of the recipient's account number
+// from whichever routing info is available, or an empty string if neither is set.
 func (r MercuryRecipient) AccountLast4() string {
-	if r.ElectronicRoutingInfo == nil {
+	info := r.preferredRoutingInfo()
+	if info == nil {
 		return ""
 	}
-	num := r.ElectronicRoutingInfo.AccountNumber
+	num := info.AccountNumber
 	if len(num) < 4 {
 		return num
 	}
@@ -70,10 +83,29 @@ func (r MercuryRecipient) AccountLast4() string {
 
 // BankName returns the recipient's bank name if available.
 func (r MercuryRecipient) BankName() string {
-	if r.ElectronicRoutingInfo == nil {
+	info := r.preferredRoutingInfo()
+	if info == nil {
 		return ""
 	}
-	return r.ElectronicRoutingInfo.BankName
+	return info.BankName
+}
+
+// SupportedMethods returns a human-readable tag indicating which payment
+// methods the recipient supports (e.g. "ACH", "Wire", "ACH+Wire"), or an
+// empty string if no routing info is set.
+func (r MercuryRecipient) SupportedMethods() string {
+	hasACH := r.ElectronicRoutingInfo != nil
+	hasWire := r.DomesticWireRoutingInfo != nil
+	switch {
+	case hasACH && hasWire:
+		return "ACH+Wire"
+	case hasACH:
+		return "ACH"
+	case hasWire:
+		return "Wire"
+	default:
+		return ""
+	}
 }
 
 type mercuryListRecipientsResponse struct {

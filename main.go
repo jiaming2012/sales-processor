@@ -686,6 +686,9 @@ func pickMercuryRecipient(recipients []external.MercuryRecipient, label string) 
 		if last4 := r.AccountLast4(); last4 != "" {
 			details = append(details, "••"+last4)
 		}
+		if methods := r.SupportedMethods(); methods != "" {
+			details = append(details, "["+methods+"]")
+		}
 		details = append(details, r.ID)
 		fmt.Printf("  %d) %s (%s)\n", i+1, r.Name, strings.Join(details, " · "))
 	}
