@@ -84,7 +84,15 @@ Effect:
 
 ---
 
-## 1. Migration — seed the placeholder catalog row
+## 1. Migration — seed the placeholder row **and** backfill past events
+
+The migration does two things in one transaction: creates the seed
+`purchase_items` row that the new handler code links against, and
+backfills placeholder `purchase_line_items` rows for every existing
+`purchase_event` that has no line items (i.e. past empty-resolution
+confirms made before this fix shipped). Goose runs Up once per
+environment, tracks it in `goose_db_version`, and never re-runs — so
+this is a clean one-shot operation with no separate script needed.
 
 New file `internal/db/migrations/00XX_no_itemized_receipt_seed.sql`:
 
@@ -92,12 +100,12 @@ New file `internal/db/migrations/00XX_no_itemized_receipt_seed.sql`:
 -- +goose Up
 BEGIN;
 
--- Stable seed row referenced by the "confirm without receipt" path in
--- ConfirmPendingPurchaseHandler. Allows purchase_line_items to link to
--- a real purchase_items row even when the operator couldn't itemize the
--- receipt — keeps the completeness gate (unlinked_line_item_ids) clean
--- and lets the COGS aggregate sum the bank total via the standard
--- SUM(quantity * price) path.
+-- 1. Stable seed row referenced by the "confirm without receipt" path in
+--    ConfirmPendingPurchaseHandler. Allows purchase_line_items to link to
+--    a real purchase_items row even when the operator couldn't itemize the
+--    receipt — keeps the completeness gate (unlinked_line_item_ids) clean
+--    and lets the COGS aggregate sum the bank total via the standard
+--    SUM(quantity * price) path.
 INSERT INTO purchase_items (id, description, group_id)
 VALUES (
   '00000000-0000-0000-0000-000000000001',
@@ -106,10 +114,36 @@ VALUES (
 )
 ON CONFLICT (description) DO NOTHING;
 
+-- 2. Backfill: every existing purchase_event with no line items was
+--    created by the pre-fix empty-resolution path. Insert one placeholder
+--    line item per event so SUM(qty * price) finally matches
+--    purchase_events.total. Past weekly reports become accurate
+--    retroactively on next /period-summary fetch.
+INSERT INTO purchase_line_items
+  (purchase_event_id, purchase_item_id, description, quantity, price, is_case)
+SELECT
+  pe.id,
+  '00000000-0000-0000-0000-000000000001',
+  '(no itemized receipt)',
+  1,
+  pe.total,
+  false
+FROM purchase_events pe
+LEFT JOIN purchase_line_items pli ON pli.purchase_event_id = pe.id
+WHERE pli.id IS NULL
+  AND pe.total > 0;
+
 COMMIT;
 
 -- +goose Down
 BEGIN;
+
+-- Down removes placeholder line items first (FK constraint requires it),
+-- then the seed row. This deletes every placeholder ever created — by
+-- the backfill AND by the new handler code path — so rolling back this
+-- migration also rolls back the fix's effect on COGS. Intentional.
+DELETE FROM purchase_line_items
+WHERE purchase_item_id = '00000000-0000-0000-0000-000000000001';
 
 DELETE FROM purchase_items
 WHERE id = '00000000-0000-0000-0000-000000000001';
@@ -129,8 +163,13 @@ Notes:
 - `group_id` stays NULL — no item_group needed for a placeholder.
   Existing schema allows NULL (`internal/db/migrations/0024_inventory.sql:30`).
 - `ON CONFLICT (description) DO NOTHING` because
-  `purchase_items.description` is `UNIQUE`. Re-running the migration is
-  idempotent.
+  `purchase_items.description` is `UNIQUE`. Safe to re-run the seed
+  insert independently if ever needed (e.g. partial restore from
+  backup).
+- The backfill is naturally idempotent via the `LEFT JOIN … WHERE
+  pli.id IS NULL` filter: once a placeholder exists for an event, it
+  no longer qualifies. Goose only runs the migration once anyway, but
+  the SQL is safe regardless.
 
 ---
 
@@ -261,32 +300,29 @@ weekly report, the sales-processor can render a small note in the
 
 ## Order of operations
 
-1. Apply the migration (`00XX_no_itemized_receipt_seed.sql`).
-2. Deploy the handler change (depends on the seed row existing — FK
-   would fail otherwise).
-3. Existing empty-items pending_purchases rows in the database have
-   no placeholder line items. They were created BEFORE this fix.
-   Two options:
-   - **Backfill**: a one-off query inserts placeholders for every
-     `purchase_event` with no `purchase_line_items` and `total > 0`.
-     Recommended — past weekly reports become accurate.
-   - **Accept the gap**: only events confirmed AFTER this fix get
-     placeholders. Past food cost % stays understated.
+Ship the migration and the handler change in the same PR. On deploy:
 
-Backfill SQL (one-shot, run from psql or a goose migration):
+1. Goose runs the migration — seeds the placeholder catalog row AND
+   backfills line items for every past empty-resolution event in one
+   transaction.
+2. New server binary starts with the updated `ConfirmPendingPurchase`
+   handler. Going forward, every "confirm without receipt" creates a
+   placeholder line item inline.
 
-```sql
-INSERT INTO purchase_line_items
-  (purchase_event_id, purchase_item_id, description, quantity, price, is_case)
-SELECT
-  pe.id,
-  '00000000-0000-0000-0000-000000000001',
-  '(no itemized receipt)',
-  1,
-  pe.total,
-  false
-FROM purchase_events pe
-LEFT JOIN purchase_line_items pli ON pli.purchase_event_id = pe.id
-WHERE pli.id IS NULL
-  AND pe.total > 0;
+That's it — no separate backfill script to run, no operator step. The
+next time sales-processor (or any caller) hits `/period-summary`, the
+COGS aggregate reflects the corrected totals retroactively.
+
+**Verification after deploy** — quick smoke test the operator can run
+without psql:
+
+```bash
+curl -s -H "Authorization: Bearer $HQ_INVENTORY_SERVICE_TOKEN" \
+  "https://<hq-host>/api/v1/inventory/period-summary?from=2026-05-25&to=2026-05-31" \
+  | python3 -m json.tool
 ```
+
+`cogs_excl_tax` should be higher than before the deploy if any past
+empty-resolution events existed in that period. `completeness.ready`
+should remain `true` (placeholders are linked, so they don't trip
+`unlinked_line_item_ids`).
