@@ -777,6 +777,64 @@ func resolveMercuryAccount(accounts []external.MercuryAccount, envVar string, la
 	return acct
 }
 
+func pickRentHoldMethod(recipient external.MercuryRecipient) string {
+	fmt.Printf("\nSelect rent hold transfer method for %s:\n", recipient.Name)
+	fmt.Printf("  1) ACH (free, 0-1 business days)\n")
+	fmt.Printf("  2) Domestic wire (same day, may incur fee)\n")
+	var choice int
+	for {
+		fmt.Print("Enter choice (1-2): ")
+		if _, err := fmt.Scanln(&choice); err != nil || choice < 1 || choice > 2 {
+			fmt.Println("Invalid choice, try again.")
+			continue
+		}
+		break
+	}
+	if choice == 1 {
+		return external.MercuryPaymentMethodACH
+	}
+	return external.MercuryPaymentMethodDomesticWire
+}
+
+func resolveRentHoldMethod(recipient external.MercuryRecipient, envVar string) string {
+	supportsACH := recipient.ElectronicRoutingInfo != nil
+	supportsWire := recipient.DomesticWireRoutingInfo != nil
+
+	if !supportsACH && !supportsWire {
+		log.Fatalf("rent hold recipient %s (%s) has no ACH or domestic wire routing — add routing in Mercury", recipient.Name, recipient.ID)
+	}
+
+	if method := os.Getenv(envVar); method != "" {
+		switch method {
+		case external.MercuryPaymentMethodACH:
+			if !supportsACH {
+				log.Fatalf("%s=%s but recipient %s does not support ACH", envVar, method, recipient.Name)
+			}
+		case external.MercuryPaymentMethodDomesticWire:
+			if !supportsWire {
+				log.Fatalf("%s=%s but recipient %s does not support domestic wire", envVar, method, recipient.Name)
+			}
+		default:
+			log.Fatalf("%s=%s is invalid (must be %s or %s)", envVar, method, external.MercuryPaymentMethodACH, external.MercuryPaymentMethodDomesticWire)
+		}
+		log.Infof("Using rent hold method: %s", method)
+		return method
+	}
+
+	if supportsACH && !supportsWire {
+		log.Infof("Using rent hold method: %s (only method supported by recipient)", external.MercuryPaymentMethodACH)
+		return external.MercuryPaymentMethodACH
+	}
+	if supportsWire && !supportsACH {
+		log.Infof("Using rent hold method: %s (only method supported by recipient)", external.MercuryPaymentMethodDomesticWire)
+		return external.MercuryPaymentMethodDomesticWire
+	}
+
+	method := pickRentHoldMethod(recipient)
+	saveEnvVar(envVar, method)
+	return method
+}
+
 func resolveMercuryRecipient(recipients []external.MercuryRecipient, envVar string, label string) external.MercuryRecipient {
 	if id := os.Getenv(envVar); id != "" {
 		for _, r := range recipients {
@@ -817,12 +875,7 @@ func executeExternalTransfer(mercuryClient *external.MercuryClient, sourceAccoun
 func main() {
 	autoApproveTransfers := flag.Bool("auto-approve-transfers", false, "automatically approve Mercury transfers without prompting")
 	mercurySandbox := flag.Bool("sandbox", false, "use Mercury sandbox environment")
-	rentHoldMethod := flag.String("rent-hold-method", external.MercuryPaymentMethodACH, "rent hold payment method: ach or domesticWire")
 	flag.Parse()
-
-	if *rentHoldMethod != external.MercuryPaymentMethodACH && *rentHoldMethod != external.MercuryPaymentMethodDomesticWire {
-		log.Fatalf("invalid --rent-hold-method=%q (must be %q or %q)", *rentHoldMethod, external.MercuryPaymentMethodACH, external.MercuryPaymentMethodDomesticWire)
-	}
 
 	if *mercurySandbox {
 		godotenv.Load(".env.sandbox")
@@ -970,18 +1023,7 @@ func main() {
 	}
 
 	rentHoldRecipient := resolveMercuryRecipient(routableRecipients, "MERCURY_RENT_HOLD_RECIPIENT_ID", "rent hold (Personal Vacation Fun)")
-
-	// Verify the chosen method is supported by the recipient before we get to transfer time.
-	switch *rentHoldMethod {
-	case external.MercuryPaymentMethodACH:
-		if rentHoldRecipient.ElectronicRoutingInfo == nil {
-			log.Fatalf("rent hold recipient %s (%s) does not support ACH — re-run with --rent-hold-method=%s", rentHoldRecipient.Name, rentHoldRecipient.ID, external.MercuryPaymentMethodDomesticWire)
-		}
-	case external.MercuryPaymentMethodDomesticWire:
-		if rentHoldRecipient.DomesticWireRoutingInfo == nil {
-			log.Fatalf("rent hold recipient %s (%s) does not support domestic wire — re-run with --rent-hold-method=%s", rentHoldRecipient.Name, rentHoldRecipient.ID, external.MercuryPaymentMethodACH)
-		}
-	}
+	rentHoldMethod := resolveRentHoldMethod(rentHoldRecipient, "MERCURY_RENT_HOLD_METHOD")
 
 	//--- Cash Held ---
 	cashHeld := getCashHeld()
@@ -1172,9 +1214,9 @@ func main() {
 			RecipientID:   rentHoldRecipient.ID,
 			Amount:        rentHoldAmount,
 			Note:          fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
-			PaymentMethod: *rentHoldMethod,
+			PaymentMethod: rentHoldMethod,
 		}
-		if *rentHoldMethod == external.MercuryPaymentMethodDomesticWire {
+		if rentHoldMethod == external.MercuryPaymentMethodDomesticWire {
 			rentHoldTransfer.Purpose = &external.MercurySendMoneyPurpose{
 				Simple: external.MercurySendMoneyPurposeSimple{
 					Category:       external.MercuryPurposeTransferToMyExternalAccount,
