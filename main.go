@@ -914,6 +914,7 @@ func main() {
 		// },
 	}
 	defaultEmployeeTaxRate := 0.25
+	commissionEmployeeTaxRate := 0.20
 	rentHoldAmount := 475.0
 
 	commissionSalesStructureStandard := &models.CommissionSalesStructure{
@@ -1181,7 +1182,7 @@ func main() {
 		}
 
 		// todo: cash held should be broken down by employee
-		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(previousDates[0], previousDates[len(previousDates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld, weeklySummary.CashTendered, rentHoldAmount, defaultEmployeeTaxRate)
+		commissionBasedEmployeesSummary := models.NewCommissionBasedEmployeesTopLineSummary(previousDates[0], previousDates[len(previousDates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld, weeklySummary.CashTendered, rentHoldAmount, commissionEmployeeTaxRate)
 
 		// todo: make employee conversion less janky
 		if empl.Name == "Latanya Mcgriff" {
