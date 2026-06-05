@@ -956,7 +956,38 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to list Mercury recipients: %v", err)
 	}
-	rentHoldRecipient := resolveMercuryRecipient(mercuryRecipients, "MERCURY_RENT_HOLD_RECIPIENT_ID", "rent hold (Personal Vacation Fun)")
+
+	// Rent hold can be sent via ACH or wire (see --rent-hold-method), so the
+	// recipient must have both routing types configured in Mercury.
+	var dualMethodRecipients []external.MercuryRecipient
+	for _, r := range mercuryRecipients {
+		if r.ElectronicRoutingInfo != nil && r.DomesticWireRoutingInfo != nil {
+			dualMethodRecipients = append(dualMethodRecipients, r)
+		}
+	}
+
+	if id := os.Getenv("MERCURY_RENT_HOLD_RECIPIENT_ID"); id != "" {
+		dualMethod := false
+		for _, r := range dualMethodRecipients {
+			if r.ID == id {
+				dualMethod = true
+				break
+			}
+		}
+		if !dualMethod {
+			for _, r := range mercuryRecipients {
+				if r.ID == id {
+					log.Fatalf("MERCURY_RENT_HOLD_RECIPIENT_ID=%s (%s) supports only %s — rent hold recipients must have both ACH and domestic wire routing configured in Mercury", id, r.Name, r.SupportedMethods())
+				}
+			}
+		}
+	}
+
+	if len(dualMethodRecipients) == 0 {
+		log.Fatalf("no Mercury recipients support both ACH and domestic wire — add ACH and wire routing to the rent hold recipient in Mercury")
+	}
+
+	rentHoldRecipient := resolveMercuryRecipient(dualMethodRecipients, "MERCURY_RENT_HOLD_RECIPIENT_ID", "rent hold (Personal Vacation Fun)")
 
 	//--- Cash Held ---
 	cashHeld := getCashHeld()
