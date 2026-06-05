@@ -1288,9 +1288,10 @@ func main() {
 		}
 	}
 
-	writePDF(reportOutput.String(), previousFromDate, toDate)
+	pdfPath := writePDF(reportOutput.String(), previousFromDate, toDate)
 
-	f, err := os.Create(fmt.Sprintf("output/payroll/payroll_%v.csv", toDate))
+	csvPath := fmt.Sprintf("output/payroll/payroll_%v.csv", toDate)
+	f, err := os.Create(csvPath)
 	if err != nil {
 		panic(err)
 	}
@@ -1298,9 +1299,13 @@ func main() {
 	if err = payroll.Entries(entries).ToCSV(f); err != nil {
 		panic(err)
 	}
+
+	fmt.Println("\n--- Output Files ---")
+	fmt.Printf("  PDF: %s\n", pdfPath)
+	fmt.Printf("  CSV: %s\n", csvPath)
 }
 
-func writePDF(report string, fromDate string, toDate string) {
+func writePDF(report string, fromDate string, toDate string) string {
 	header := fmt.Sprintf("Sales Report for %s - %s\n\n", fromDate, toDate)
 
 	pdf := fpdf.New("P", "mm", "A4", "")
@@ -1309,9 +1314,11 @@ func writePDF(report string, fromDate string, toDate string) {
 	pdf.MultiCell(0, 10, header, "", "", false)
 	pdf.MultiCell(0, 10, report, "", "", false)
 
-	if err := pdf.OutputFileAndClose(fmt.Sprintf("output/payroll/payroll_%v.pdf", toDate)); err != nil {
+	path := fmt.Sprintf("output/payroll/payroll_%v.pdf", toDate)
+	if err := pdf.OutputFileAndClose(path); err != nil {
 		panic(err)
 	}
+	return path
 }
 
 func readData(fileName string) ([]*models.Sale, error) {
