@@ -1214,6 +1214,25 @@ func main() {
 	reportOutput.WriteString(weeklySummary.Show())
 	reportOutput.WriteString("\n")
 
+	//--- Cash ---
+	reportOutput.WriteString("Cash\n")
+	reportOutput.WriteString("-----------------------\n")
+	reportOutput.WriteString("\n")
+	totalCashHeld := 0.0
+	if len(cashHeld) == 0 {
+		reportOutput.WriteString("No cash taken.\n")
+	} else {
+		for _, cash := range cashHeld {
+			reportOutput.WriteString(fmt.Sprintf("  -$%.2f\n", cash))
+			totalCashHeld += cash
+		}
+	}
+	if weeklySummary.CashTendered > totalCashHeld {
+		cashLeftover := weeklySummary.CashTendered - totalCashHeld
+		reportOutput.WriteString(fmt.Sprintf("Cash Left in Register: $%.2f\n", cashLeftover))
+	}
+	reportOutput.WriteString("\n")
+
 	//--- Sales Commission Breakdown ---
 	reportOutput.WriteString("Sales Commission Breakdown\n")
 	reportOutput.WriteString("-----------------------\n")
