@@ -1,0 +1,89 @@
+# CLI & Environment Specification
+
+## Invocation
+
+```
+go run main.go [flags]
+```
+
+## Flags
+
+| Flag | Type | Default | Purpose |
+|---|---|---|---|
+| `--sandbox` | bool | `false` | Use Mercury's sandbox environment. Also routes env-file writes to `.env.sandbox` instead of `.env` |
+| `--auto-approve-transfers` | bool | `false` | Skip the y/n prompt before dispatching each transfer batch |
+| `--force-resend` | string | `""` | Comma-separated list of transfer kinds to clear from the ledger before this run. Accepts `sales_tax`, `deferred_taxes`, `rent_hold`, or `all` |
+
+Removed (and intentionally not reintroduced):
+- `--rent-hold-method` — replaced by `MERCURY_RENT_HOLD_METHOD` env var
+  + interactive prompt. The CLI surface area for this decision is
+  redundant with the recipient's routing info.
+
+## Environment Variables
+
+All env vars are loaded from `.env` (production) or `.env.sandbox`
+(when `--sandbox` is passed) via `godotenv`.
+
+### Mercury
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `MERCURY_API_KEY` | Yes | Bearer token for the Mercury Business workspace |
+| `MERCURY_SANDBOX` | No | When `true`, env-file writes target `.env.sandbox`. Equivalent to but separate from the `--sandbox` flag |
+| `MERCURY_SOURCE_ACCOUNT_ID` | No* | Source (Operations) account ID |
+| `MERCURY_SALES_TAX_ACCOUNT_ID` | No* | Sales-tax destination account |
+| `MERCURY_DEFERRED_TAX_ACCOUNT_ID` | No* | Deferred-taxes destination account |
+| `MERCURY_RENT_HOLD_RECIPIENT_ID` | No* | Rent-hold recipient (Mercury Personal account via the recipient flow) |
+| `MERCURY_RENT_HOLD_METHOD` | No | `ach` or `domesticWire`. When unset and the recipient supports both, the user is prompted and the choice is persisted here |
+
+\* Not strictly required, but absence triggers an interactive picker
+that writes the resulting ID back to the env file.
+
+### Sling
+
+| Variable | Required | Purpose |
+|---|---|---|
+| (none — credentials are currently hardcoded in `main.go`) | | TODO: extract to env |
+
+## Output Files
+
+| Path | Created by | Purpose |
+|---|---|---|
+| `output/payroll/payroll_<toDate>.pdf` | `writePDF` | Human-readable weekly report |
+| `output/payroll/payroll_<toDate>.csv` | OnPay export | Machine import format |
+| `output/transfers/transfers_<toDate>.json` | Transfer ledger | Idempotency state per pay period |
+
+At end of run, the PDF and CSV paths are printed under an
+`--- Output Files ---` block. The transfer ledger path is not printed
+because it is operational state, not a user-facing artifact.
+
+## Exit Behavior
+
+- Any failure during account/recipient resolution or env-var validation
+  exits via `log.Fatalf` with a descriptive message.
+- A failed Mercury transfer logs the error but does *not* exit — the
+  ledger records `status=failed` and processing continues with the
+  remaining transfers. The failed kind will be retried on the next run.
+- Save-ledger failures log an error but do not exit; the in-memory
+  state is lost, so on the next run those transfers will re-attempt
+  using their stable idempotency keys (Mercury will reject duplicates).
+
+## Interactive Prompts
+
+The script is partially interactive. Prompts appear in this order
+during a typical run:
+
+1. Mercury account picker(s) — only when the corresponding env var is
+   unset. One picker per missing account.
+2. Mercury recipient picker — when `MERCURY_RENT_HOLD_RECIPIENT_ID` is
+   unset.
+3. Rent-hold method picker — when `MERCURY_RENT_HOLD_METHOD` is unset
+   *and* the recipient supports both ACH and wire.
+4. Per-cash-employee net pay (currently dormant — `cashEmployees`
+   slice is empty).
+5. Transfer approval (`y/n`) — once for the internal-transfer batch
+   and once for the external (rent-hold) transfer. Suppressed by
+   `--auto-approve-transfers`.
+
+All picker selections are persisted to the env file so subsequent runs
+are non-interactive unless the underlying Mercury data changes.
