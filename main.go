@@ -1409,53 +1409,204 @@ func main() {
 
 func writePDF(report string, fromDate string, toDate string) string {
 	const (
-		bodyFontSize    = 16.0
-		headingFontSize = 22.0
+		bodyFontSize    = 12.0
+		headingFontSize = 20.0
+		bodyFontFamily  = "Helvetica"
 	)
 
 	pdf := fpdf.New("P", "mm", "A4", "")
 	pdf.AddPage()
 
-	pdf.SetFont("Helvetica", "B", headingFontSize)
+	pdf.SetFont(bodyFontFamily, "B", headingFontSize)
 	pdf.MultiCell(0, 10, fmt.Sprintf("Sales Report for %s - %s", fromDate, toDate), "", "", false)
 	pdf.Ln(4)
 
-	pdf.SetFont("Courier", "", bodyFontSize)
-
-	lines := strings.Split(report, "\n")
-	flushBody := func(buf *strings.Builder) {
-		if buf.Len() == 0 {
-			return
-		}
-		pdf.SetFont("Courier", "", bodyFontSize)
-		pdf.MultiCell(0, 10, buf.String(), "", "", false)
-		buf.Reset()
-	}
-
-	body := strings.Builder{}
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		// A heading is a non-empty line followed by a line of dashes.
-		if i+1 < len(lines) && isDashLine(lines[i+1]) && strings.TrimSpace(line) != "" {
-			flushBody(&body)
-			pdf.SetFont("Helvetica", "B", headingFontSize)
-			pdf.MultiCell(0, 12, line, "", "", false)
-			pdf.Ln(2)
-			i++ // skip the dashes line — the larger bold heading replaces the underline
-			continue
-		}
-		body.WriteString(line)
-		if i < len(lines)-1 {
-			body.WriteString("\n")
-		}
-	}
-	flushBody(&body)
+	renderReport(pdf, report, bodyFontFamily, bodyFontSize, headingFontSize)
 
 	path := fmt.Sprintf("output/payroll/payroll_%v.pdf", toDate)
 	if err := pdf.OutputFileAndClose(path); err != nil {
 		panic(err)
 	}
 	return path
+}
+
+type pdfTableRow struct {
+	isGap  bool
+	indent int
+	label  string
+	value  string
+}
+
+func renderReport(pdf *fpdf.Fpdf, report string, family string, bodyFontSize, headingFontSize float64) {
+	lines := strings.Split(report, "\n")
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// Heading: text line followed by a dashes line.
+		if i+1 < len(lines) && trimmed != "" && isDashLine(lines[i+1]) {
+			pdf.SetFont(family, "B", headingFontSize)
+			pdf.MultiCell(0, 11, trimmed, "", "L", false)
+			pdf.Ln(2)
+			i += 2
+			continue
+		}
+
+		// Standalone dashes line: skip — likely an orphan separator.
+		if isDashLine(line) {
+			i++
+			continue
+		}
+
+		// Try to collect a table block starting here.
+		rows, advance := collectPdfTableBlock(lines, i)
+		if len(rows) > 0 {
+			renderPdfTableBlock(pdf, rows, family, bodyFontSize)
+			i += advance
+			continue
+		}
+
+		// Blank line outside a table block: small vertical spacer.
+		if trimmed == "" {
+			pdf.Ln(3)
+			i++
+			continue
+		}
+
+		// Sub-heading (non-indented standalone label, often introduces a table block).
+		if !startsWithSpaces(line) {
+			pdf.SetFont(family, "B", bodyFontSize)
+			pdf.MultiCell(0, 7, trimmed, "", "L", false)
+			pdf.Ln(1)
+		} else {
+			pdf.SetFont(family, "", bodyFontSize)
+			pdf.MultiCell(0, 7, line, "", "L", false)
+		}
+		i++
+	}
+}
+
+// collectPdfTableBlock gathers consecutive `label: value` lines starting at i,
+// allowing blank-line spacers between rows within the block. Returns the row
+// slice and the number of input lines consumed.
+func collectPdfTableBlock(lines []string, i int) ([]pdfTableRow, int) {
+	var rows []pdfTableRow
+	j := i
+	pendingGaps := 0
+
+	for j < len(lines) {
+		line := lines[j]
+		trimmed := strings.TrimSpace(line)
+
+		// Heading boundary: line followed by dashes ends this block.
+		if j+1 < len(lines) && trimmed != "" && isDashLine(lines[j+1]) {
+			break
+		}
+		if isDashLine(line) {
+			break
+		}
+
+		if trimmed == "" {
+			if len(rows) == 0 {
+				// Leading blanks belong to the caller, not the block.
+				return nil, 0
+			}
+			pendingGaps++
+			j++
+			continue
+		}
+
+		row, ok := parsePdfTableRow(line)
+		if !ok {
+			break
+		}
+		for k := 0; k < pendingGaps; k++ {
+			rows = append(rows, pdfTableRow{isGap: true})
+		}
+		pendingGaps = 0
+		rows = append(rows, row)
+		j++
+	}
+
+	if len(rows) == 0 {
+		return nil, 0
+	}
+	// Don't consume trailing blanks — let the caller render them as the
+	// inter-block gap.
+	return rows, j - i - pendingGaps
+}
+
+func parsePdfTableRow(line string) (pdfTableRow, bool) {
+	indent := 0
+	for indent < len(line) && line[indent] == ' ' {
+		indent++
+	}
+	content := line[indent:]
+	idx := strings.Index(content, ":")
+	if idx <= 0 || idx >= len(content)-1 {
+		return pdfTableRow{}, false
+	}
+	label := strings.TrimSpace(content[:idx]) + ":"
+	value := strings.TrimSpace(content[idx+1:])
+	if value == "" {
+		return pdfTableRow{}, false
+	}
+	return pdfTableRow{indent: indent, label: label, value: value}, true
+}
+
+func renderPdfTableBlock(pdf *fpdf.Fpdf, rows []pdfTableRow, family string, bodyFontSize float64) {
+	pdf.SetFont(family, "", bodyFontSize)
+
+	const (
+		indentStep    = 1.5  // mm per leading space
+		labelPadRight = 4.0  // mm gap between label and value columns
+		rowHeight     = 7.0
+		gapHeight     = 3.0
+	)
+
+	// Auto-fit label column to the widest label (including its indent) in this block.
+	var maxLabelWidth float64
+	for _, r := range rows {
+		if r.isGap {
+			continue
+		}
+		w := pdf.GetStringWidth(r.label) + float64(r.indent)*indentStep
+		if w > maxLabelWidth {
+			maxLabelWidth = w
+		}
+	}
+	labelColWidth := maxLabelWidth + labelPadRight
+
+	leftMargin, _, rightMargin, _ := pdf.GetMargins()
+	pageW, _ := pdf.GetPageSize()
+	valueColWidth := pageW - leftMargin - rightMargin - labelColWidth
+
+	for _, r := range rows {
+		if r.isGap {
+			pdf.Ln(gapHeight)
+			continue
+		}
+		indentWidth := float64(r.indent) * indentStep
+		if indentWidth > 0 {
+			pdf.CellFormat(indentWidth, rowHeight, "", "", 0, "L", false, 0, "")
+		}
+		pdf.CellFormat(labelColWidth-indentWidth, rowHeight, r.label, "", 0, "L", false, 0, "")
+
+		// Use MultiCell for the value so long expressions wrap inside the column.
+		x := pdf.GetX()
+		y := pdf.GetY()
+		pdf.MultiCell(valueColWidth, rowHeight, r.value, "", "L", false)
+		// If the value wrapped, MultiCell already moved Y. Otherwise force a newline.
+		if pdf.GetY() == y+rowHeight {
+			// Single-line value — Y advanced exactly one row, all good.
+		}
+		_ = x
+	}
+}
+
+func startsWithSpaces(s string) bool {
+	return len(s) > 0 && s[0] == ' '
 }
 
 func isDashLine(s string) bool {

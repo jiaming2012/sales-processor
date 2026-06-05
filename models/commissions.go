@@ -118,24 +118,6 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 
 	output.WriteString(fmt.Sprintf("Base Pay: $%.2f\n", basePay))
 
-	output.WriteString("\nCash:\n")
-
-	totalCashHeld := 0.0
-
-	if len(s.CashHeld) == 0 {
-		output.WriteString("No cash taken.\n")
-	} else {
-		for _, cash := range s.CashHeld {
-			output.WriteString(fmt.Sprintf("  -$%.2f\n", cash))
-			totalCashHeld += cash
-		}
-	}
-
-	if s.CashTendered > totalCashHeld {
-		cashLeftover := s.CashTendered - totalCashHeld
-		output.WriteString(fmt.Sprintf("Cash Left in Register: $%.2f\n", cashLeftover))
-	}
-
 	output.WriteString(fmt.Sprintf("\nSales: $%.2f * %.0f%% = $%.2f\n", s.NetSales, s.SalesCommissionPercentage*100, commission))
 	output.WriteString(fmt.Sprintf("Tips: $%.2f\n", s.Tips))
 
