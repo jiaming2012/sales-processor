@@ -5,6 +5,15 @@ This document specifies a second change to the **Yumyums HQ backend**
 [`cogs-hq-handoff.md`](./cogs-hq-handoff.md) (per-vendor breakdown) but
 independent — either can ship first.
 
+> ⚠ **Known bug introduced by this change** — the "confirm without
+> receipt" path here creates a `purchase_event` with no
+> `purchase_line_items`, which causes `cogs_excl_tax` to undercount by
+> the unrecorded bank total. The original spec called this
+> "acceptable"; subsequent real-world use showed it isn't. The fix is
+> specified separately in
+> [`cogs-hq-undercount-fix.md`](./cogs-hq-undercount-fix.md) — ship
+> together with this doc (or right after).
+
 Suggested workflow: feed the spec below into `/gsd-quick` from the
 `hq/` directory.
 
@@ -187,13 +196,12 @@ handler so it doesn't error on rows where `items` is empty and
 case, and write a single `purchase_event` with no line items.
 
 A `purchase_event` with no `purchase_line_items` means
-`cogs_excl_tax` *under-counts* by the unrecorded item total —
-acceptable since the operator chose "no receipt available", and the
-tax-inclusive total is still captured via `tax=0, total=bank_total`.
-
-If future scope wants stricter behavior, route these to a "needs
-itemization later" follow-up bucket. For MVP the lossy version is
-fine.
+`cogs_excl_tax` *under-counts* by the unrecorded item total — this
+spec originally called that acceptable. **It isn't** —
+[`cogs-hq-undercount-fix.md`](./cogs-hq-undercount-fix.md) supersedes
+that decision by inserting a single placeholder line item linked to a
+seed catalog row, so `SUM(quantity * price)` picks up the bank total.
+Apply both docs together.
 
 ---
 
