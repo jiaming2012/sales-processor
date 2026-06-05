@@ -946,6 +946,7 @@ func main() {
 	autoApproveTransfers := flag.Bool("auto-approve-transfers", false, "automatically approve Mercury transfers without prompting")
 	mercurySandbox := flag.Bool("sandbox", false, "use Mercury sandbox environment")
 	forceResend := flag.String("force-resend", "", "comma-separated transfer kinds to force re-send (sales_tax, deferred_taxes, rent_hold, all)")
+	skipMercury := flag.Bool("skip-mercury", false, "skip Mercury account resolution and transfer dispatch (preview mode — no bank movement)")
 	flag.Parse()
 
 	forcedKinds, err := transferledger.ParseKinds(*forceResend)
@@ -1071,40 +1072,56 @@ func main() {
 	//}
 
 	//--- Mercury Setup ---
-	mercuryAPIKey := os.Getenv("MERCURY_API_KEY")
-	if mercuryAPIKey == "" {
-		log.Fatal("MERCURY_API_KEY environment variable is required")
-	}
-
-	mercuryClient := external.NewMercuryClient(mercuryAPIKey, *mercurySandbox)
-	mercuryAccounts, err := mercuryClient.ListAccounts()
-	if err != nil {
-		log.Fatalf("failed to list Mercury accounts: %v", err)
-	}
-
-	sourceAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_SOURCE_ACCOUNT_ID", "source (Operations)")
-	salesTaxAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_SALES_TAX_ACCOUNT_ID", "sales tax")
-	deferredTaxAccount := resolveMercuryAccount(mercuryAccounts, "MERCURY_DEFERRED_TAX_ACCOUNT_ID", "deferred taxes")
-
-	mercuryRecipients, err := mercuryClient.ListRecipients()
-	if err != nil {
-		log.Fatalf("failed to list Mercury recipients: %v", err)
-	}
-
-	// Show all recipients with any routing info — including wire-only or ACH-only.
-	var routableRecipients []external.MercuryRecipient
-	for _, r := range mercuryRecipients {
-		if r.ElectronicRoutingInfo != nil || r.DomesticWireRoutingInfo != nil {
-			routableRecipients = append(routableRecipients, r)
+	// When --skip-mercury is set, all Mercury vars stay at zero values and
+	// the transfer-dispatch block below is gated off the same flag. This
+	// lets operators preview the report (e.g., iterate on COGS formatting)
+	// without reachable banking infrastructure.
+	var (
+		mercuryClient      *external.MercuryClient
+		sourceAccount      external.MercuryAccount
+		salesTaxAccount    external.MercuryAccount
+		deferredTaxAccount external.MercuryAccount
+		rentHoldRecipient  external.MercuryRecipient
+		rentHoldMethod     string
+	)
+	if *skipMercury {
+		log.Warn("--skip-mercury set: skipping Mercury account resolution and transfer dispatch (no bank movement this run)")
+	} else {
+		mercuryAPIKey := os.Getenv("MERCURY_API_KEY")
+		if mercuryAPIKey == "" {
+			log.Fatal("MERCURY_API_KEY environment variable is required")
 		}
-	}
 
-	if len(routableRecipients) == 0 {
-		log.Fatalf("no Mercury recipients have ACH or domestic wire routing configured")
-	}
+		mercuryClient = external.NewMercuryClient(mercuryAPIKey, *mercurySandbox)
+		mercuryAccounts, err := mercuryClient.ListAccounts()
+		if err != nil {
+			log.Fatalf("failed to list Mercury accounts: %v", err)
+		}
 
-	rentHoldRecipient := resolveMercuryRecipient(routableRecipients, "MERCURY_RENT_HOLD_RECIPIENT_ID", "rent hold (Personal Vacation Fun)")
-	rentHoldMethod := resolveRentHoldMethod(rentHoldRecipient, "MERCURY_RENT_HOLD_METHOD")
+		sourceAccount = resolveMercuryAccount(mercuryAccounts, "MERCURY_SOURCE_ACCOUNT_ID", "source (Operations)")
+		salesTaxAccount = resolveMercuryAccount(mercuryAccounts, "MERCURY_SALES_TAX_ACCOUNT_ID", "sales tax")
+		deferredTaxAccount = resolveMercuryAccount(mercuryAccounts, "MERCURY_DEFERRED_TAX_ACCOUNT_ID", "deferred taxes")
+
+		mercuryRecipients, err := mercuryClient.ListRecipients()
+		if err != nil {
+			log.Fatalf("failed to list Mercury recipients: %v", err)
+		}
+
+		// Show all recipients with any routing info — including wire-only or ACH-only.
+		var routableRecipients []external.MercuryRecipient
+		for _, r := range mercuryRecipients {
+			if r.ElectronicRoutingInfo != nil || r.DomesticWireRoutingInfo != nil {
+				routableRecipients = append(routableRecipients, r)
+			}
+		}
+
+		if len(routableRecipients) == 0 {
+			log.Fatalf("no Mercury recipients have ACH or domestic wire routing configured")
+		}
+
+		rentHoldRecipient = resolveMercuryRecipient(routableRecipients, "MERCURY_RENT_HOLD_RECIPIENT_ID", "rent hold (Personal Vacation Fun)")
+		rentHoldMethod = resolveRentHoldMethod(rentHoldRecipient, "MERCURY_RENT_HOLD_METHOD")
+	}
 
 	//--- Cash Held ---
 	cashHeld := getCashHeld()
@@ -1118,6 +1135,14 @@ func main() {
 	dates := service.GetDatesStartingFromPreviousMonday(sunday)
 	fromDate := dates[0].Format("2006-01-02")
 	toDate := dates[len(dates)-1].Format("2006-01-02")
+
+	//--- COGS (from HQ inventory) ---
+	// HQ_INVENTORY_SERVICE_TOKEN gates the integration. When unset, the
+	// run continues without a COGS section so dev environments without
+	// HQ access aren't blocked. When set, an incomplete period (pending
+	// receipts or unlinked line items) is treated as a hard failure —
+	// food cost numbers would be misleading.
+	hqSummary := fetchHQPeriodSummary(dates[0], dates[len(dates)-1])
 
 	//--- Report Headers (Previous Timesheet) ---
 	lastWeek := now.AddDate(0, 0, -7)
@@ -1225,6 +1250,12 @@ func main() {
 	reportOutput.WriteString(weeklySummary.Show())
 	reportOutput.WriteString("\n")
 
+	//--- Cost of Goods Sold ---
+	if hqSummary != nil {
+		reportOutput.WriteString(renderCOGSSection(hqSummary, weeklySummary.Sales))
+		reportOutput.WriteString("\n")
+	}
+
 	//--- Voided Orders ---
 	reportOutput.WriteString("Voided Orders\n")
 	reportOutput.WriteString("-----------------------\n")
@@ -1300,103 +1331,110 @@ func main() {
 	}
 
 	//--- Mercury Transfers ---
-	payrollTaxes := 0.0
-	for _, employee := range cashEmployeeWages {
-		payrollTaxes += employee.Taxes
-	}
-
-	ledger, err := transferledger.Load("output/transfers", toDate)
-	if err != nil {
-		log.Fatalf("load transfer ledger: %v", err)
-	}
-	if len(forcedKinds) > 0 {
-		ledger.Clear(forcedKinds...)
-		log.Infof("--force-resend cleared ledger entries: %v", forcedKinds)
-	}
-
-	logSkipped := func(kind transferledger.Kind, e transferledger.Entry) {
-		fmt.Printf("[skipped] %s already sent on %s ($%.2f → %s) — use --force-resend=%s to re-send\n",
-			kind, e.SentAt.Format("2006-01-02"), e.Amount, e.Destination, kind)
-	}
-
-	type plannedInternal struct {
-		kind    transferledger.Kind
-		request external.MercuryTransferRequest
-	}
-	var planned []plannedInternal
-	if weeklySummary.SalesTax > 0 {
-		if e, sent := ledger.Sent(transferledger.KindSalesTax); sent {
-			logSkipped(transferledger.KindSalesTax, e)
-		} else {
-			planned = append(planned, plannedInternal{
-				kind: transferledger.KindSalesTax,
-				request: external.MercuryTransferRequest{
-					FromAccountID:  sourceAccount.ID,
-					ToAccountID:    salesTaxAccount.ID,
-					ToAccountName:  salesTaxAccount.Name,
-					Amount:         weeklySummary.SalesTax,
-					Note:           fmt.Sprintf("Sales tax %s - %s", fromDate, toDate),
-					IdempotencyKey: transferledger.IdempotencyKey(toDate, transferledger.KindSalesTax, forcedSet[transferledger.KindSalesTax]),
-				},
-			})
+	// Gated by --skip-mercury: when set, the setup block above left
+	// mercuryClient and the account/recipient vars at zero values, so
+	// dispatching here would panic. The whole block — including ledger
+	// updates — is skipped together so a preview run doesn't desync the
+	// ledger from real bank state.
+	if !*skipMercury {
+		payrollTaxes := 0.0
+		for _, employee := range cashEmployeeWages {
+			payrollTaxes += employee.Taxes
 		}
-	}
-	if payrollTaxes > 0 {
-		if e, sent := ledger.Sent(transferledger.KindDeferredTaxes); sent {
-			logSkipped(transferledger.KindDeferredTaxes, e)
-		} else {
-			planned = append(planned, plannedInternal{
-				kind: transferledger.KindDeferredTaxes,
-				request: external.MercuryTransferRequest{
-					FromAccountID:  sourceAccount.ID,
-					ToAccountID:    deferredTaxAccount.ID,
-					ToAccountName:  deferredTaxAccount.Name,
-					Amount:         payrollTaxes,
-					Note:           fmt.Sprintf("Deferred taxes %s - %s", fromDate, toDate),
-					IdempotencyKey: transferledger.IdempotencyKey(toDate, transferledger.KindDeferredTaxes, forcedSet[transferledger.KindDeferredTaxes]),
-				},
-			})
-		}
-	}
 
-	if len(planned) > 0 {
-		requests := make([]external.MercuryTransferRequest, len(planned))
-		for i, p := range planned {
-			requests[i] = p.request
+		ledger, err := transferledger.Load("output/transfers", toDate)
+		if err != nil {
+			log.Fatalf("load transfer ledger: %v", err)
 		}
-		outcomes := executeTransfers(mercuryClient, sourceAccount, requests, *autoApproveTransfers)
-		for i, p := range planned {
-			recordOutcome(ledger, p.kind, p.request.Amount, "internal", p.request.ToAccountName, p.request.IdempotencyKey, outcomes[i])
+		if len(forcedKinds) > 0 {
+			ledger.Clear(forcedKinds...)
+			log.Infof("--force-resend cleared ledger entries: %v", forcedKinds)
 		}
-	}
 
-	if rentHoldAmount > 0 {
-		if e, sent := ledger.Sent(transferledger.KindRentHold); sent {
-			logSkipped(transferledger.KindRentHold, e)
-		} else {
-			rentHoldTransfer := external.MercuryExternalTransferRequest{
-				FromAccountID:  sourceAccount.ID,
-				RecipientID:    rentHoldRecipient.ID,
-				Amount:         rentHoldAmount,
-				Note:           fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
-				PaymentMethod:  rentHoldMethod,
-				IdempotencyKey: transferledger.IdempotencyKey(toDate, transferledger.KindRentHold, forcedSet[transferledger.KindRentHold]),
-			}
-			if rentHoldMethod == external.MercuryPaymentMethodDomesticWire {
-				rentHoldTransfer.Purpose = &external.MercurySendMoneyPurpose{
-					Simple: external.MercurySendMoneyPurposeSimple{
-						Category:       external.MercuryPurposeTransferToMyExternalAccount,
-						AdditionalInfo: fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
+		logSkipped := func(kind transferledger.Kind, e transferledger.Entry) {
+			fmt.Printf("[skipped] %s already sent on %s ($%.2f → %s) — use --force-resend=%s to re-send\n",
+				kind, e.SentAt.Format("2006-01-02"), e.Amount, e.Destination, kind)
+		}
+
+		type plannedInternal struct {
+			kind    transferledger.Kind
+			request external.MercuryTransferRequest
+		}
+		var planned []plannedInternal
+		if weeklySummary.SalesTax > 0 {
+			if e, sent := ledger.Sent(transferledger.KindSalesTax); sent {
+				logSkipped(transferledger.KindSalesTax, e)
+			} else {
+				planned = append(planned, plannedInternal{
+					kind: transferledger.KindSalesTax,
+					request: external.MercuryTransferRequest{
+						FromAccountID:  sourceAccount.ID,
+						ToAccountID:    salesTaxAccount.ID,
+						ToAccountName:  salesTaxAccount.Name,
+						Amount:         weeklySummary.SalesTax,
+						Note:           fmt.Sprintf("Sales tax %s - %s", fromDate, toDate),
+						IdempotencyKey: transferledger.IdempotencyKey(toDate, transferledger.KindSalesTax, forcedSet[transferledger.KindSalesTax]),
 					},
-				}
+				})
 			}
-			outcome := executeExternalTransfer(mercuryClient, sourceAccount, rentHoldRecipient, rentHoldTransfer, *autoApproveTransfers)
-			recordOutcome(ledger, transferledger.KindRentHold, rentHoldAmount, rentHoldMethod, formatRecipientDest(rentHoldRecipient), rentHoldTransfer.IdempotencyKey, outcome)
 		}
-	}
+		if payrollTaxes > 0 {
+			if e, sent := ledger.Sent(transferledger.KindDeferredTaxes); sent {
+				logSkipped(transferledger.KindDeferredTaxes, e)
+			} else {
+				planned = append(planned, plannedInternal{
+					kind: transferledger.KindDeferredTaxes,
+					request: external.MercuryTransferRequest{
+						FromAccountID:  sourceAccount.ID,
+						ToAccountID:    deferredTaxAccount.ID,
+						ToAccountName:  deferredTaxAccount.Name,
+						Amount:         payrollTaxes,
+						Note:           fmt.Sprintf("Deferred taxes %s - %s", fromDate, toDate),
+						IdempotencyKey: transferledger.IdempotencyKey(toDate, transferledger.KindDeferredTaxes, forcedSet[transferledger.KindDeferredTaxes]),
+					},
+				})
+			}
+		}
 
-	if err := ledger.Save(); err != nil {
-		log.Errorf("save transfer ledger: %v", err)
+		if len(planned) > 0 {
+			requests := make([]external.MercuryTransferRequest, len(planned))
+			for i, p := range planned {
+				requests[i] = p.request
+			}
+			outcomes := executeTransfers(mercuryClient, sourceAccount, requests, *autoApproveTransfers)
+			for i, p := range planned {
+				recordOutcome(ledger, p.kind, p.request.Amount, "internal", p.request.ToAccountName, p.request.IdempotencyKey, outcomes[i])
+			}
+		}
+
+		if rentHoldAmount > 0 {
+			if e, sent := ledger.Sent(transferledger.KindRentHold); sent {
+				logSkipped(transferledger.KindRentHold, e)
+			} else {
+				rentHoldTransfer := external.MercuryExternalTransferRequest{
+					FromAccountID:  sourceAccount.ID,
+					RecipientID:    rentHoldRecipient.ID,
+					Amount:         rentHoldAmount,
+					Note:           fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
+					PaymentMethod:  rentHoldMethod,
+					IdempotencyKey: transferledger.IdempotencyKey(toDate, transferledger.KindRentHold, forcedSet[transferledger.KindRentHold]),
+				}
+				if rentHoldMethod == external.MercuryPaymentMethodDomesticWire {
+					rentHoldTransfer.Purpose = &external.MercurySendMoneyPurpose{
+						Simple: external.MercurySendMoneyPurposeSimple{
+							Category:       external.MercuryPurposeTransferToMyExternalAccount,
+							AdditionalInfo: fmt.Sprintf("Rent hold %s - %s", fromDate, toDate),
+						},
+					}
+				}
+				outcome := executeExternalTransfer(mercuryClient, sourceAccount, rentHoldRecipient, rentHoldTransfer, *autoApproveTransfers)
+				recordOutcome(ledger, transferledger.KindRentHold, rentHoldAmount, rentHoldMethod, formatRecipientDest(rentHoldRecipient), rentHoldTransfer.IdempotencyKey, outcome)
+			}
+		}
+
+		if err := ledger.Save(); err != nil {
+			log.Errorf("save transfer ledger: %v", err)
+		}
 	}
 
 	log.Debug(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
@@ -1670,6 +1708,84 @@ func isDashLine(s string) bool {
 		}
 	}
 	return true
+}
+
+// fetchHQPeriodSummary returns the HQ-side COGS summary for the pay period
+// or nil when the integration is not configured. On any other failure
+// (HTTP error, decode error, or incomplete data) it terminates the run via
+// log.Fatalf — the alternative is publishing a payroll PDF with silently
+// wrong food cost numbers.
+func fetchHQPeriodSummary(from, to time.Time) *external.HQPeriodSummary {
+	client, err := external.NewHQClientFromEnv()
+	if err != nil {
+		log.Fatalf("init HQ client: %v", err)
+	}
+	if client == nil {
+		log.Info("HQ_INVENTORY_SERVICE_TOKEN not set — skipping Cost of Goods Sold section")
+		return nil
+	}
+
+	summary, err := client.GetPeriodSummary(from, to)
+	if err != nil {
+		log.Fatalf("fetch HQ period summary: %v", err)
+	}
+
+	if !summary.Completeness.Ready {
+		log.Fatalf(
+			"HQ COGS data incomplete for %s–%s: %d receipt(s) pending review, %d line item(s) unlinked. "+
+				"Resolve in the HQ Inventory dashboard before re-running.\n  pending_review_ids=%v\n  unlinked_line_item_ids=%v",
+			summary.From, summary.To,
+			len(summary.Completeness.PendingReviewIDs),
+			len(summary.Completeness.UnlinkedLineItemIDs),
+			summary.Completeness.PendingReviewIDs,
+			summary.Completeness.UnlinkedLineItemIDs,
+		)
+	}
+
+	return summary
+}
+
+// renderCOGSSection produces the Cost of Goods Sold section in the
+// pay-period text format consumed by renderReport. netSales is the
+// post-unpaid-orders weekly figure used for the food-cost ratio.
+func renderCOGSSection(s *external.HQPeriodSummary, netSales float64) string {
+	var out strings.Builder
+	out.WriteString("Cost of Goods Sold\n")
+	out.WriteString("-----------------------\n")
+	out.WriteString("\n")
+
+	foodCostPct := "n/a"
+	grossProfit := -s.COGSExclTax
+	if netSales > 0 {
+		foodCostPct = fmt.Sprintf("%.1f%%", (s.COGSExclTax/netSales)*100)
+		grossProfit = netSales - s.COGSExclTax
+	}
+	tax := s.COGSInclTax - s.COGSExclTax
+
+	out.WriteString(fmt.Sprintf("  Net Sales: $%.2f\n", netSales))
+	out.WriteString(fmt.Sprintf("  COGS: $%.2f\n", s.COGSExclTax))
+	out.WriteString(fmt.Sprintf("  Tax: $%.2f\n", tax))
+	out.WriteString(fmt.Sprintf("  Gross Profit: $%.2f\n", grossProfit))
+	out.WriteString(fmt.Sprintf("  Food Cost %%: %s\n", foodCostPct))
+	out.WriteString(fmt.Sprintf("  Receipts in HQ: %d\n", s.PurchaseEventCount))
+
+	if len(s.ByVendor) > 0 {
+		out.WriteString("\n")
+		out.WriteString("By Vendor\n")
+		for _, v := range s.ByVendor {
+			// Sanitize: colons in the vendor name would corrupt the
+			// label/value split in renderReport's table parser.
+			name := strings.ReplaceAll(v.VendorName, ":", " -")
+			tripWord := "trips"
+			if v.TripCount == 1 {
+				tripWord = "trip"
+			}
+			out.WriteString(fmt.Sprintf("  %s (%d %s): $%.2f pre-tax ($%.2f incl tax)\n",
+				name, v.TripCount, tripWord, v.TotalExclTax, v.TotalInclTax))
+		}
+	}
+
+	return out.String()
 }
 
 func readData(fileName string) ([]*models.Sale, error) {

@@ -28,9 +28,12 @@ The PDF is built by concatenating section blocks in this fixed order:
 5. **This Week's Hours** — hourly wage breakdown for the current pay period
 6. **Previous Week's Hours** — hourly wage breakdown for the prior period
    (informational; not paid out this cycle)
-7. **Voided Orders** — every voided order with timestamp + total voided
-8. **Cash** — period cash position
-9. **Sales Commission Breakdown** — per-employee commission detail
+7. **Cost of Goods Sold** — food cost ratio + per-vendor breakdown,
+   sourced from the HQ inventory service. Omitted when
+   `HQ_INVENTORY_SERVICE_TOKEN` is unset (see [CLI doc](cli.md))
+8. **Voided Orders** — every voided order with timestamp + total voided
+9. **Cash** — period cash position
+10. **Sales Commission Breakdown** — per-employee commission detail
 
 > The Cash and Sales Commission sections are intentionally separated:
 > cash is a period-level fact, not a per-employee fact.
@@ -141,6 +144,56 @@ Each employee renders as a 4-line block:
 
 Cash employees follow the same heading + table-row pattern but with a
 single combined line: `<name>: $<pay> pay + $<taxes> taxes = $<total>`.
+
+### Cost of Goods Sold
+
+Sourced from `GET /api/v1/inventory/period-summary?from=&to=` on the HQ
+backend. The section is omitted entirely when
+`HQ_INVENTORY_SERVICE_TOKEN` is unset; when the token *is* set but HQ
+reports the period as incomplete (pending receipts or unlinked line
+items), the run fails before any PDF is written.
+
+```
+Cost of Goods Sold
+-----------------------
+
+  Net Sales:        $<weekly net sales>
+  COGS:             $<HQ cogs_excl_tax>
+  Tax:              $<HQ cogs_incl_tax − cogs_excl_tax>
+  Gross Profit:     $<Net Sales − COGS>
+  Food Cost %:      <COGS / Net Sales, 1 decimal>
+  Receipts in HQ:   <HQ purchase_event_count>
+
+By Vendor
+  <Vendor Name> (<N> trips): $<vendor pre-tax> pre-tax ($<vendor incl tax> incl tax)
+  ... one row per vendor with at least one receipt in the period ...
+```
+
+- `Net Sales` is `weeklySummary.Sales` *after* unpaid-delivery
+  adjustment — the same number used by the Summary section.
+- `COGS` is the pre-tax line-item total. `Tax` is the difference
+  between HQ's `cogs_incl_tax` and `cogs_excl_tax` — i.e. the sales tax
+  paid to vendors, surfaced as its own line so the COGS row matches
+  the "food cost" mental model.
+- `Food Cost %` uses the pre-tax COGS so the ratio matches industry
+  convention (tax-inclusive would overstate food cost relative to
+  net-of-tax sales).
+- When `Net Sales` is `$0` (slow week, demo data), `Food Cost %` renders
+  as `n/a` and `Gross Profit` falls back to `-COGS`.
+- `Receipts in HQ` is HQ's `purchase_event_count`. It's printed as a
+  cross-check signal: HQ can only report on receipts it has ingested
+  (Mercury card transactions with attachments, plus manual entries).
+  Cash purchases and card transactions without photographed receipts
+  are invisible — a wildly low food-cost % usually means receipts are
+  missing, not that purchasing didn't happen.
+- The `By Vendor` sub-block requires HQ's `by_vendor` response field
+  (see `docs/cogs-hq-handoff.md`). Until HQ ships that field, only the
+  summary block prints — the section degrades gracefully rather than
+  breaking the report.
+- Rows are pre-sorted by HQ descending on pre-tax spend; the consumer
+  preserves that order.
+- Colons in vendor names are replaced with ` -` to keep the table
+  renderer's label/value split intact.
 
 ### Voided Orders
 

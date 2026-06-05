@@ -13,6 +13,7 @@ go run main.go [flags]
 | `--sandbox` | bool | `false` | Use Mercury's sandbox environment. Also routes env-file writes to `.env.sandbox` instead of `.env` |
 | `--auto-approve-transfers` | bool | `false` | Skip the y/n prompt before dispatching each transfer batch |
 | `--force-resend` | string | `""` | Comma-separated list of transfer kinds to clear from the ledger before this run. Accepts `sales_tax`, `deferred_taxes`, `rent_hold`, or `all` |
+| `--skip-mercury` | bool | `false` | Preview mode: bypass Mercury account/recipient resolution and transfer dispatch. The PDF/CSV still render (including the COGS section when HQ is configured), but no transfers are planned, executed, or ledger-recorded. Use when iterating on report formatting without reachable Mercury (offline dev, blocked IP, etc.) |
 
 Removed (and intentionally not reintroduced):
 - `--rent-hold-method` — replaced by `MERCURY_RENT_HOLD_METHOD` env var
@@ -45,6 +46,18 @@ that writes the resulting ID back to the env file.
 |---|---|---|
 | (none — credentials are currently hardcoded in `main.go`) | | TODO: extract to env |
 
+### HQ (Cost of Goods Sold)
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `HQ_INVENTORY_SERVICE_TOKEN` | No\* | Bearer token for the HQ inventory service. Must match the value the HQ backend reads under the same name. When unset, the COGS section is omitted and the run continues |
+| `HQ_BASE_URL` | No | Defaults to `http://localhost:8080`. Override when pointing at a non-local HQ deployment |
+
+\* Not required to run the report. When unset, the PDF prints without
+a Cost of Goods Sold section. When set, the report **fails fast** if HQ
+reports incomplete data for the period (pending receipt review or
+unlinked line items) — see Exit Behavior below.
+
 ## Output Files
 
 | Path | Created by | Purpose |
@@ -67,6 +80,12 @@ because it is operational state, not a user-facing artifact.
 - Save-ledger failures log an error but do not exit; the in-memory
   state is lost, so on the next run those transfers will re-attempt
   using their stable idempotency keys (Mercury will reject duplicates).
+- HQ COGS failures (`HQ_INVENTORY_SERVICE_TOKEN` set, but HQ unreachable,
+  returns an error, or reports `completeness.ready=false`) exit via
+  `log.Fatalf` *before* the PDF is rendered. The fatal message includes
+  the pending receipt IDs and unlinked line-item IDs so the operator can
+  resolve them in the HQ Inventory dashboard. When the token is unset,
+  the run continues without the COGS section — no error.
 
 ## Interactive Prompts
 
