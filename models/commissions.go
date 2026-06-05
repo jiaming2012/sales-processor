@@ -117,8 +117,6 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 	basePay := s.GetBasePay()
 
 	output.WriteString(fmt.Sprintf("Base Pay: $%.2f\n", basePay))
-	output.WriteString(fmt.Sprintf("Sales: $%.2f * %.0f%% = $%.2f\n", s.NetSales, s.SalesCommissionPercentage*100, commission))
-	output.WriteString(fmt.Sprintf("Tips: $%.2f\n", s.Tips))
 
 	output.WriteString("\nCash:\n")
 
@@ -137,6 +135,9 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 		cashLeftover := s.CashTendered - totalCashHeld
 		output.WriteString(fmt.Sprintf("Cash Left in Register: $%.2f\n", cashLeftover))
 	}
+
+	output.WriteString(fmt.Sprintf("\nSales: $%.2f * %.0f%% = $%.2f\n", s.NetSales, s.SalesCommissionPercentage*100, commission))
+	output.WriteString(fmt.Sprintf("Tips: $%.2f\n", s.Tips))
 
 	preTaxPay := basePay + commission + s.Tips
 	netPay := preTaxPay - s.Taxes
