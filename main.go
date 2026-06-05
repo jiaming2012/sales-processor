@@ -1237,7 +1237,8 @@ func main() {
 			if tab == "" {
 				tab = "(no tab)"
 			}
-			reportOutput.WriteString(fmt.Sprintf("Order #%d %s: $%.2f\n", v.OrderNumber, tab, v.Amount))
+			opened := v.Opened.Format("01/02 3:04 PM")
+			reportOutput.WriteString(fmt.Sprintf("Order #%d - %s - %s: $%.2f\n", v.OrderNumber, opened, tab, v.Amount))
 		}
 	}
 	reportOutput.WriteString(fmt.Sprintf("Total Voided: $%.2f\n", weeklySummary.VoidedTotal))
