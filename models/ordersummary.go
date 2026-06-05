@@ -14,6 +14,7 @@ type OrderSummary struct {
 	CCFees         float64
 	AvgDuration    time.Duration
 	Voids          int
+	VoidedOrders   []*OrderDetail
 	MissedPayments []*OrderDetail
 }
 

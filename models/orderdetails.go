@@ -27,12 +27,14 @@ func calculateAverageDuration(durations []time.Duration) time.Duration {
 func (orders OrderDetails) GetSummary(tipsWithheldPercentage float64) OrderSummary {
 	var amount, taxes, tips, cashTendered, ccFees float64 = 0, 0, 0, 0, 0
 	var voids = 0
+	voided := make([]*OrderDetail, 0)
 	missed := make([]*OrderDetail, 0)
 	durations := make([]time.Duration, 0)
 
 	for _, o := range orders {
 		if o.Voided {
 			voids += 1
+			voided = append(voided, o)
 			continue
 		}
 
@@ -60,6 +62,7 @@ func (orders OrderDetails) GetSummary(tipsWithheldPercentage float64) OrderSumma
 		CCFees:         ccFees,
 		AvgDuration:    calculateAverageDuration(durations),
 		Voids:          voids,
+		VoidedOrders:   voided,
 		MissedPayments: missed,
 	}
 }

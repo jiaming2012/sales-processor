@@ -15,6 +15,8 @@ type WeeklySummary struct {
 	SalesTax         float64
 	CashTendered     float64
 	CCFees           float64
+	VoidedTotal      float64
+	VoidedOrders     []*OrderDetail
 	Tips             TipDetails
 	Hours            []EmployeeHours
 	PreviousHours    []EmployeeHours
@@ -105,6 +107,7 @@ func (s *WeeklySummary) Show() string {
 	output.WriteString(fmt.Sprintf("  Sales Tax:        $%.2f\n", s.SalesTax))
 	output.WriteString(fmt.Sprintf("  Cash Tendered:    $%.2f\n", s.CashTendered))
 	output.WriteString(fmt.Sprintf("  Credit Card Fees: $%.2f\n", s.CCFees))
+	output.WriteString(fmt.Sprintf("  Voided Sales:     $%.2f\n", s.VoidedTotal))
 	output.WriteString("\n")
 
 	output.WriteString("Labor\n")

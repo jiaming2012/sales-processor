@@ -392,15 +392,24 @@ func CalcTipShare(durationWorked time.Duration) int {
 // 4 - 6 -> 66%
 // 2 - 4 -> 33%
 // <2 -> 0%
-func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours, previousEmployeeHours []models.EmployeeHours, cashEmployeesPay []models.CashEmployeePay) models.WeeklySummary {
+func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours, previousEmployeeHours []models.EmployeeHours, cashEmployeesPay []models.CashEmployeePay, tipsWithheldPercentage float64) models.WeeklySummary {
 	var tipDetails models.TipDetails
 	tipDetails.Details = make(map[models.Employee]float64)
 	totalSales := 0.0
 	totalTaxes := 0.0
 	totalCashTendered := 0.0
 	totalCCFees := 0.0
+	voidedTotal := 0.0
+	var voidedOrders []*models.OrderDetail
 
 	for reportTime, summary := range dailyReport {
+		for _, details := range summary.EmployeeDetails {
+			perEmployee := models.OrderDetails(details).GetSummary(tipsWithheldPercentage)
+			for _, v := range perEmployee.VoidedOrders {
+				voidedTotal += v.Amount
+				voidedOrders = append(voidedOrders, v)
+			}
+		}
 		tipsShare := make(map[models.Employee]int)
 		schedule := timesheet[reportTime.Weekday()]
 
@@ -438,6 +447,8 @@ func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesh
 		SalesTax:         totalTaxes,
 		CashTendered:     totalCashTendered,
 		CCFees:           totalCCFees,
+		VoidedTotal:      voidedTotal,
+		VoidedOrders:     voidedOrders,
 		Hours:            employeeHours,
 		PreviousHours:    previousEmployeeHours,
 		CashEmployeesPay: cashEmployeesPay,
@@ -1206,12 +1217,30 @@ func main() {
 		panic(err)
 	}
 
-	weeklySummary := CalculateWeeklyReport(dailyReport, ts, employeeHours, previousEmployeeHours, cashEmployeeWages)
+	weeklySummary := CalculateWeeklyReport(dailyReport, ts, employeeHours, previousEmployeeHours, cashEmployeeWages, tipsWithheldPercentage)
 
 	//--- todo: wait for manual input
 
 	weeklySummary.Sales -= unpaidOrdersSummary.TotalSales
 	reportOutput.WriteString(weeklySummary.Show())
+	reportOutput.WriteString("\n")
+
+	//--- Voided Orders ---
+	reportOutput.WriteString("Voided Orders\n")
+	reportOutput.WriteString("-----------------------\n")
+	reportOutput.WriteString("\n")
+	if len(weeklySummary.VoidedOrders) == 0 {
+		reportOutput.WriteString("No voided orders.\n")
+	} else {
+		for _, v := range weeklySummary.VoidedOrders {
+			tab := v.TabNames
+			if tab == "" {
+				tab = "(no tab)"
+			}
+			reportOutput.WriteString(fmt.Sprintf("Order #%d %s: $%.2f\n", v.OrderNumber, tab, v.Amount))
+		}
+	}
+	reportOutput.WriteString(fmt.Sprintf("Total Voided: $%.2f\n", weeklySummary.VoidedTotal))
 	reportOutput.WriteString("\n")
 
 	//--- Cash ---
