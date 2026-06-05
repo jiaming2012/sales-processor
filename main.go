@@ -1307,19 +1307,67 @@ func main() {
 }
 
 func writePDF(report string, fromDate string, toDate string) string {
-	header := fmt.Sprintf("Sales Report for %s - %s\n\n", fromDate, toDate)
+	const (
+		bodyFontSize    = 16.0
+		headingFontSize = 22.0
+	)
 
 	pdf := fpdf.New("P", "mm", "A4", "")
 	pdf.AddPage()
-	pdf.SetFont("Helvetica", "", 16)
-	pdf.MultiCell(0, 10, header, "", "", false)
-	pdf.MultiCell(0, 10, report, "", "", false)
+
+	pdf.SetFont("Helvetica", "B", headingFontSize)
+	pdf.MultiCell(0, 10, fmt.Sprintf("Sales Report for %s - %s", fromDate, toDate), "", "", false)
+	pdf.Ln(4)
+
+	pdf.SetFont("Helvetica", "", bodyFontSize)
+
+	lines := strings.Split(report, "\n")
+	flushBody := func(buf *strings.Builder) {
+		if buf.Len() == 0 {
+			return
+		}
+		pdf.SetFont("Helvetica", "", bodyFontSize)
+		pdf.MultiCell(0, 10, buf.String(), "", "", false)
+		buf.Reset()
+	}
+
+	body := strings.Builder{}
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		// A heading is a non-empty line followed by a line of dashes.
+		if i+1 < len(lines) && isDashLine(lines[i+1]) && strings.TrimSpace(line) != "" {
+			flushBody(&body)
+			pdf.SetFont("Helvetica", "B", headingFontSize)
+			pdf.MultiCell(0, 12, line, "", "", false)
+			pdf.Ln(2)
+			i++ // skip the dashes line — the larger bold heading replaces the underline
+			continue
+		}
+		body.WriteString(line)
+		if i < len(lines)-1 {
+			body.WriteString("\n")
+		}
+	}
+	flushBody(&body)
 
 	path := fmt.Sprintf("output/payroll/payroll_%v.pdf", toDate)
 	if err := pdf.OutputFileAndClose(path); err != nil {
 		panic(err)
 	}
 	return path
+}
+
+func isDashLine(s string) bool {
+	t := strings.TrimSpace(s)
+	if len(t) < 5 {
+		return false
+	}
+	for _, r := range t {
+		if r != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func readData(fileName string) ([]*models.Sale, error) {
