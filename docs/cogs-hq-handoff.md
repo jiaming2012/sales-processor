@@ -1,9 +1,13 @@
 # HQ Backend Change Handoff — `by_vendor` on `/period-summary`
 
-> **Companion doc:** [`cogs-hq-receipt-gate.md`](./cogs-hq-receipt-gate.md)
-> covers the parallel HQ change that makes the completeness gate fail on
-> unreceipted Mercury card transactions. The two are independent — either
-> can ship first.
+> **Companion docs:**
+> - [`cogs-hq-receipt-gate.md`](./cogs-hq-receipt-gate.md) — completeness
+>   gate for unreceipted Mercury card transactions (shipped).
+> - [`cogs-hq-undercount-fix.md`](./cogs-hq-undercount-fix.md) — placeholder
+>   line items so "confirm without receipt" still adds to COGS (shipped).
+>
+> This doc is independent of both — `by_vendor` is purely additive on the
+> response. Safe to ship anytime.
 
 This document specifies a small change to the **Yumyums HQ backend**
 (`/Users/jamal/projects/yumyums/hq/backend`) so that the sales-processor's
@@ -141,10 +145,19 @@ as `[]` not `null` when there is no spend in the period.
 
 ## 2. `handler.go` — new SQL block
 
-The current aggregate query (`handler.go:1088-1103`) computes one row
+The current aggregate query (`handler.go:1122-1136`) computes one row
 covering the whole period. Add a second query that returns one row per
 vendor. Place it between the existing step 1 (aggregate) and step 2
-(pending IDs) — vendor breakdown is the natural extension of the aggregate.
+(pending IDs query at `handler.go:1147-1170`) — vendor breakdown is the
+natural extension of the aggregate.
+
+> **Interaction with the empty-resolution placeholder** (from
+> `cogs-hq-undercount-fix.md`): "confirm without receipt" events now ship
+> with one synthetic `purchase_line_items` row (`description = '(no
+> itemized receipt)'`, `purchase_item_id = '000…001'`, `qty=1`,
+> `price=bank_total`). The SQL below treats these like any other line
+> item — they sum into `total_excl_tax` per vendor correctly. No special
+> handling needed.
 
 Suggested SQL:
 
@@ -187,7 +200,7 @@ Notes:
 - Order: spend desc, name asc as tiebreaker (deterministic for tests and
   the PDF table).
 
-Scan loop (mirrors the pattern at lines 1115-1141):
+Scan loop (mirrors the pendingIDs pattern at `handler.go:1147-1170`):
 
 ```go
 byVendor := []VendorCOGS{}
@@ -214,7 +227,7 @@ if err := rowsV.Err(); err != nil {
 }
 ```
 
-Then in the response struct literal (`handler.go:1175-1186`), add:
+Then in the response struct literal (`handler.go:1208-1220`), add:
 
 ```go
 ByVendor: byVendor,
@@ -235,9 +248,12 @@ test):
 3. **Order**: rows ordered by `TotalExclTax DESC`, then `VendorName ASC`.
 4. **Empty period**: `by_vendor` is `[]`, not `null`, when no events fall in
    the period.
-5. **Zero-line-items receipt**: a `purchase_event` whose lines were never
-   parsed still produces a row with `TotalExclTax = 0` and `TripCount = 1`
-   (regression guard for the LEFT JOIN behavior).
+5. **Zero-line-items receipt (regression guard)**: synthetically insert
+   a `purchase_event` row with no `purchase_line_items` (bypassing the
+   normal confirm path so the undercount-fix placeholder isn't created).
+   Assert the vendor still appears in `by_vendor` with `TotalExclTax = 0`
+   and `TripCount = 1`. Guards against future code paths that create
+   events without line items.
 
 ---
 
