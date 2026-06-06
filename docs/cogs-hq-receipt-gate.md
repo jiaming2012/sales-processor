@@ -291,3 +291,145 @@ If readability becomes a problem we can later have HQ split
 (e.g. "12 receipts failed to parse, 35 card transactions with no
 receipt"). Not needed for v1 — the operator opens the HQ dashboard
 either way.
+
+---
+
+# Amendment — Completeness query must filter on event_date, not created_at
+
+> **Status**: applies after the rest of this doc has shipped. If
+> you're picking this doc up fresh, treat the amendment as a normal
+> additional change inline. If everything above is already deployed in
+> HQ, only the changes in this amendment need to be applied.
+
+## What the bug looks like in practice
+
+After the receipt-gate change shipped, the completeness gate started
+returning `ready: true` for periods that actually had unresolved
+pending rows. Concrete reproduction (from a real run):
+
+- May 29 Mercury card transaction at Restaurant Depot, $391.96, no
+  receipt photo attached.
+- HQ receipt worker polled on Jun 2 (within its 14-day lookback) and
+  correctly created a `pending_purchases` row with
+  `reason='no_attachment_on_bank_tx'`, `event_date='2026-05-29'`,
+  `created_at='2026-06-02 22:02 UTC'`.
+- Sales-processor weekly run asked HQ "is 2026-05-25 → 2026-05-31
+  complete?" → HQ returned `ready: true` with `pending_review_ids: []`.
+- The $391.96 of food cost silently disappeared from the weekly COGS
+  even though the gate's whole job is to catch this.
+
+## Root cause
+
+The pending-review query in `PeriodSummaryHandler` filters on
+`(created_at AT TIME ZONE 'America/Chicago')::date`. That's the date
+the *worker* first saw the row, not the date the *transaction*
+happened.
+
+Pre-receipt-gate, the two were always within hours of each other
+(receipts arrived in Mercury near-real-time, worker polled every 6h,
+created_at ≈ transaction date). So filtering on created_at was fine.
+
+After receipt-gate, no-attachment rows are created when the worker
+notices a transaction in its 14-day lookback. A receipt for May 29
+can land in `pending_purchases` on Jun 2 — outside the May 25–31
+period filter — and the gate misses it.
+
+## Fix
+
+Filter on `event_date` when present, fall back to created_at when not.
+`event_date` is the transaction's actual date (copied from
+Mercury's `CreatedAt`), so it's the right thing to filter on for any
+pending row that has it. The COALESCE preserves backward compatibility
+for rows where the worker failed to extract `event_date` before
+landing the row.
+
+### Files to change
+
+| File | What changes |
+|---|---|
+| `internal/inventory/handler.go` | Update the pending-review query in `PeriodSummaryHandler` (around `handler.go:1147-1170`) — replace `created_at::date` filter with `COALESCE(event_date, created_at::date)`. |
+| `internal/inventory/period_summary_test.go` | Add cases covering the four event_date × created_at combinations. |
+
+No schema change — `pending_purchases.event_date` already exists
+(nullable DATE column, set by `insertPendingPurchase` at
+`worker.go:302` via `parseEventDate(tx.CreatedAt)`).
+
+### Query diff
+
+Current (`handler.go:1147-1170`):
+
+```go
+rows, err := pool.Query(r.Context(), `
+    SELECT id::text
+    FROM pending_purchases
+    WHERE (created_at AT TIME ZONE 'America/Chicago')::date BETWEEN $1 AND $2
+      AND confirmed_at IS NULL
+      AND discarded_at IS NULL
+    ORDER BY created_at`, fromStr, toStr)
+```
+
+After:
+
+```go
+rows, err := pool.Query(r.Context(), `
+    SELECT id::text
+    FROM pending_purchases
+    WHERE COALESCE(event_date, (created_at AT TIME ZONE 'America/Chicago')::date)
+            BETWEEN $1 AND $2
+      AND confirmed_at IS NULL
+      AND discarded_at IS NULL
+    ORDER BY COALESCE(event_date, (created_at AT TIME ZONE 'America/Chicago')::date),
+             created_at`, fromStr, toStr)
+```
+
+The `ORDER BY` mirrors the `WHERE` so listing order matches the same
+"when did this actually happen" axis. Stable secondary sort on
+`created_at` for rows that share an event_date.
+
+### Tests — four cases on the `event_date` × `created_at` axis
+
+Add to `internal/inventory/period_summary_test.go`:
+
+| Case | event_date | created_at | Period | Expected |
+|---|---|---|---|---|
+| 1 | IN range | OUT of range | period | **listed** (event_date wins) |
+| 2 | OUT of range | IN range | period | **not listed** |
+| 3 | NULL | IN range | period | **listed** (falls back to created_at) |
+| 4 | NULL | OUT of range | period | **not listed** |
+
+Case 1 is the regression that motivated this fix. Cases 3 and 4
+preserve the pre-fix behavior for rows where event_date wasn't
+extracted (e.g., receipt parsing failed early enough that
+`parseEventDate(tx.CreatedAt)` wasn't reached or returned empty).
+
+Also extend the existing `Unreceipted transaction blocks completeness`
+test from the parent doc to set `event_date` explicitly, since that's
+now the load-bearing field.
+
+### Why not just drop created_at entirely
+
+`event_date` is nullable. Rows where the worker bailed out early enough
+that it never set event_date still need to be visible to the gate (a
+broken parser shouldn't be invisible). The COALESCE keeps those rows
+in scope using the worker's runtime as a fallback proxy.
+
+The longer-term fix is to make `event_date` non-nullable everywhere by
+defaulting to "the date the worker first saw the bank tx" when no
+better date is available — but that's a schema change with backfill
+work, out of scope for this small correction.
+
+### Verification after deploy
+
+```bash
+curl -s -H "Authorization: Bearer $HQ_INVENTORY_SERVICE_TOKEN" \
+  "https://<hq-host>/api/v1/inventory/period-summary?from=2026-05-25&to=2026-05-31" \
+  | python3 -m json.tool | grep -E '(ready|pending_review_ids)'
+```
+
+`pending_review_ids` should now include any pending row whose
+`event_date` falls in the period, regardless of when the worker
+actually noticed it. `ready` becomes `false` if that list is non-empty.
+
+Then re-run sales-processor — the run should fail-fast with the
+correct count of pending receipts to triage, exactly as the
+receipt-gate change originally intended.
