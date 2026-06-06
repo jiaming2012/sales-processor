@@ -252,7 +252,8 @@ func PromptForPeriod(to time.Time) string {
 	b.WriteString("2. categoryId MUST be drawn from the snapshot's categories[] list — don't invent ids.\n")
 	b.WriteString("3. Use \"Other / Needs Review\" when you're uncertain. Don't guess.\n")
 	b.WriteString("4. Classify based on bankDescription, merchant.name, amount, and mercuryCategory.\n")
-	b.WriteString("5. Output VALID JSON only — no markdown fences, no commentary, no trailing text.\n\n")
+	b.WriteString("5. Output VALID JSON only — no markdown fences, no commentary, no trailing text.\n")
+	b.WriteString("6. After you have written the proposals file, your final message to the user MUST be exactly: \"Classification complete — please exit (Ctrl+D or /exit) so sales-processor can resume the payroll run.\" Do not do anything else after writing the file; the parent process is blocked on this CLI exiting.\n\n")
 
 	b.WriteString("Category meanings:\n")
 	for _, c := range CanonicalCategories {
