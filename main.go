@@ -1795,15 +1795,7 @@ func fetchHQPeriodSummary(mercuryClient *external.MercuryClient, from, to time.T
 	}
 
 	if !summary.Completeness.Ready {
-		log.Fatalf(
-			"HQ COGS data incomplete for %s–%s: %d receipt(s) pending review, %d line item(s) unlinked. "+
-				"Resolve in the HQ Inventory dashboard before re-running.\n  pending_review_ids=%v\n  unlinked_line_item_ids=%v",
-			summary.From, summary.To,
-			len(summary.Completeness.PendingReviewIDs),
-			len(summary.Completeness.UnlinkedLineItemIDs),
-			summary.Completeness.PendingReviewIDs,
-			summary.Completeness.UnlinkedLineItemIDs,
-		)
+		log.Fatal(formatHQCompletenessFailure(client.BaseURL(), summary))
 	}
 
 	// Mercury↔HQ gap check: Mercury sees card transactions the moment the
@@ -1833,22 +1825,97 @@ func fetchHQPeriodSummary(mercuryClient *external.MercuryClient, from, to time.T
 
 	gap := external.MercuryHQGap(txns, summary.TrackedBankTxIDs)
 	if len(gap) > 0 {
-		var b strings.Builder
-		fmt.Fprintf(&b,
-			"Mercury has %d card transaction(s) HQ's receipt worker hasn't ingested yet for %s–%s. "+
-				"Wait for the next receipt-worker poll (~6h) and re-run, or kick the worker manually.\n",
-			len(gap), summary.From, summary.To,
-		)
-		for _, tx := range gap {
-			fmt.Fprintf(&b,
-				"  - %s  $%.2f  %s  (%s)  %s\n",
-				tx.CreatedAt, tx.Amount, tx.BankDescription, tx.ID, tx.DashboardLink,
-			)
-		}
-		log.Fatal(b.String())
+		log.Fatal(formatMercuryGapFailure(summary.From, summary.To, gap))
 	}
 
 	return summary
+}
+
+// formatHQCompletenessFailure renders an operator-friendly multi-line
+// banner for the "HQ has unresolved receipts" failure. The single-line
+// FATA log buried the actionable bits (where to go, what to do) under
+// UUID noise; this version leads with the count and a click-through to
+// the inventory dashboard, and only dumps IDs at the bottom as debug
+// detail. hqBaseURL is the HQ root (typically same origin as the API);
+// HQ serves the static inventory.html UI from there.
+func formatHQCompletenessFailure(hqBaseURL string, s *external.HQPeriodSummary) string {
+	const bar = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	var b strings.Builder
+	pending := len(s.Completeness.PendingReviewIDs)
+	unlinked := len(s.Completeness.UnlinkedLineItemIDs)
+
+	b.WriteString("\n")
+	b.WriteString(bar + "\n")
+	switch {
+	case pending > 0 && unlinked > 0:
+		fmt.Fprintf(&b, "  HQ COGS NOT READY — %d receipt(s) need review, %d line item(s) unlinked.\n", pending, unlinked)
+	case pending > 0:
+		fmt.Fprintf(&b, "  HQ COGS NOT READY — %d receipt(s) waiting for your review.\n", pending)
+	case unlinked > 0:
+		fmt.Fprintf(&b, "  HQ COGS NOT READY — %d line item(s) need a catalog match.\n", unlinked)
+	}
+	b.WriteString(bar + "\n\n")
+	fmt.Fprintf(&b, "Pay period:  %s → %s\n\n", s.From, s.To)
+
+	b.WriteString("What to do:\n")
+	step := 1
+	if pending > 0 {
+		fmt.Fprintf(&b, "  %d. Open HQ Inventory → Purchases tab:\n", step)
+		fmt.Fprintf(&b, "     %s/inventory.html#tab=1\n", hqBaseURL)
+		fmt.Fprintf(&b, "  %d. Confirm or discard each pending receipt (%d total).\n", step+1, pending)
+		step += 2
+	}
+	if unlinked > 0 {
+		fmt.Fprintf(&b, "  %d. Link the %d unlinked line item(s) to catalog entries (same Purchases tab,\n", step, unlinked)
+		b.WriteString("     scroll to the Unlinked section).\n")
+		step++
+	}
+	fmt.Fprintf(&b, "  %d. Re-run sales-processor.\n\n", step)
+
+	if pending > 0 {
+		b.WriteString("Pending IDs (for debugging):\n")
+		for _, id := range s.Completeness.PendingReviewIDs {
+			fmt.Fprintf(&b, "  - %s\n", id)
+		}
+	}
+	if unlinked > 0 {
+		b.WriteString("Unlinked line item IDs (for debugging):\n")
+		for _, id := range s.Completeness.UnlinkedLineItemIDs {
+			fmt.Fprintf(&b, "  - %s\n", id)
+		}
+	}
+	return b.String()
+}
+
+// formatMercuryGapFailure renders the operator-friendly banner for the
+// "Mercury saw card txns HQ hasn't ingested yet" failure. Same shape
+// as formatHQCompletenessFailure so failures feel consistent across
+// the two completeness gates.
+func formatMercuryGapFailure(from, to string, gap []external.MercuryTransactionLite) string {
+	const bar = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	var b strings.Builder
+
+	b.WriteString("\n")
+	b.WriteString(bar + "\n")
+	fmt.Fprintf(&b, "  HQ COGS NOT READY — Mercury has %d card txn(s) HQ hasn't ingested yet.\n", len(gap))
+	b.WriteString(bar + "\n\n")
+	fmt.Fprintf(&b, "Pay period:  %s → %s\n\n", from, to)
+
+	b.WriteString("What's happening:\n")
+	b.WriteString("  Mercury surfaced new card transactions, but HQ's receipt worker hasn't\n")
+	b.WriteString("  polled since. Continuing now would silently undercount COGS by the\n")
+	b.WriteString("  amount(s) below.\n\n")
+
+	b.WriteString("What to do:\n")
+	b.WriteString("  1. Wait for the next receipt-worker poll (~6h) and re-run, OR\n")
+	b.WriteString("  2. Kick the receipt worker manually on the HQ box, then re-run.\n\n")
+
+	b.WriteString("Missing transactions:\n")
+	for _, tx := range gap {
+		fmt.Fprintf(&b, "  - %s  $%.2f  %s\n", tx.CreatedAt, tx.Amount, tx.BankDescription)
+		fmt.Fprintf(&b, "    id=%s  %s\n", tx.ID, tx.DashboardLink)
+	}
+	return b.String()
 }
 
 // renderCOGSSection produces the Cost of Goods Sold section in the

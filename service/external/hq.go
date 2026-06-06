@@ -60,6 +60,11 @@ type HQClient struct {
 	httpClient *http.Client
 }
 
+// BaseURL returns the HQ base URL the client was configured with
+// (HQ_BASE_URL or the default). Used by callers that need to construct
+// operator-facing UI links (e.g. /inventory.html) alongside API calls.
+func (c *HQClient) BaseURL() string { return c.baseURL }
+
 // NewHQClientFromEnv constructs an HQClient using HQ_INVENTORY_SERVICE_TOKEN
 // and HQ_BASE_URL from the environment. Returns (nil, nil) when the token
 // is unset — callers should treat that as "COGS integration not configured"
