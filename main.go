@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 	googlesheets "google.golang.org/api/sheets/v4"
 
 	"jiaming2012/sales-processor/database"
+	"jiaming2012/sales-processor/internal/classify"
 	"jiaming2012/sales-processor/models"
 	"jiaming2012/sales-processor/payroll"
 	"jiaming2012/sales-processor/service"
@@ -947,6 +949,7 @@ func main() {
 	mercurySandbox := flag.Bool("sandbox", false, "use Mercury sandbox environment")
 	forceResend := flag.String("force-resend", "", "comma-separated transfer kinds to force re-send (sales_tax, deferred_taxes, rent_hold, all)")
 	skipMercury := flag.Bool("skip-mercury", false, "skip Mercury account resolution and transfer dispatch (preview mode — no bank movement)")
+	skipClassify := flag.Bool("skip-classify", false, "skip the Mercury transaction classify pipeline (Pull → Claude → Apply)")
 	flag.Parse()
 
 	forcedKinds, err := transferledger.ParseKinds(*forceResend)
@@ -1135,6 +1138,16 @@ func main() {
 	dates := service.GetDatesStartingFromPreviousMonday(sunday)
 	fromDate := dates[0].Format("2006-01-02")
 	toDate := dates[len(dates)-1].Format("2006-01-02")
+
+	//--- Mercury Transaction Classification (Claude via CLI) ---
+	// Pull every card tx in the pay period, hand the snapshot to Claude via
+	// the `claude` CLI (one-shot session), then PATCH Mercury with the
+	// proposed categories. Skipped when --skip-mercury (no Mercury client)
+	// or --skip-classify (operator opt-out). Fails hard at every step:
+	// missing CLI, Mercury error, malformed proposals, PATCH error.
+	if !*skipMercury && !*skipClassify {
+		classifyMercuryTransactions(mercuryClient, dates[0], dates[len(dates)-1])
+	}
 
 	//--- COGS (from HQ inventory) ---
 	// HQ_INVENTORY_SERVICE_TOKEN gates the integration. When unset, the
@@ -1708,6 +1721,50 @@ func isDashLine(s string) bool {
 		}
 	}
 	return true
+}
+
+// classifyMercuryTransactions runs the three-phase classify pipeline inline:
+// Pull the period's card txs to a snapshot file → invoke `claude` to write
+// the proposals file → Apply the proposals back to Mercury. Fail-hard at
+// every step. The trade-off is operator velocity: any infrastructure issue
+// (missing claude CLI, Mercury 401, malformed Claude output) kills the
+// weekly run, but a successful run guarantees Mercury is fully categorized
+// for the period before the report renders.
+func classifyMercuryTransactions(client *external.MercuryClient, from, to time.Time) {
+	if _, err := exec.LookPath("claude"); err != nil {
+		log.Fatalf("classify: `claude` CLI not found in PATH — install Claude Code or pass --skip-classify")
+	}
+
+	log.Infof("classify: pulling Mercury card transactions for %s..%s", from.Format("2006-01-02"), to.Format("2006-01-02"))
+	snapshotPath, err := classify.Pull(client, from, to)
+	if err != nil {
+		log.Fatalf("classify Pull: %v", err)
+	}
+	log.Infof("classify: snapshot written → %s", snapshotPath)
+
+	proposalsPath := classify.ProposalsPath(to)
+	// Pre-clear any stale proposals from a previous failed run — Claude
+	// won't overwrite (it's writing fresh) but leftover applied.json from
+	// a successful prior run shouldn't confuse us either.
+	_ = os.Remove(proposalsPath)
+
+	log.Infof("classify: invoking `claude` to classify (may take a moment)")
+	cmd := exec.Command("claude", classify.PromptForPeriod(to))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("classify: `claude` invocation failed: %v", err)
+	}
+
+	if _, err := os.Stat(proposalsPath); err != nil {
+		log.Fatalf("classify: Claude did not write the expected proposals file at %s (stat: %v) — re-run or pass --skip-classify to bypass", proposalsPath, err)
+	}
+
+	stats, err := classify.Apply(client, to)
+	if err != nil {
+		log.Fatalf("classify Apply: %v", err)
+	}
+	log.Infof("classify: complete — %d transactions patched, %d already correct", stats.Patched, stats.Skipped)
 }
 
 // fetchHQPeriodSummary returns the HQ-side COGS summary for the pay period

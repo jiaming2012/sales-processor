@@ -332,3 +332,225 @@ func (c *MercuryClient) CreateExternalTransfer(transfer MercuryExternalTransferR
 
 	return nil
 }
+
+// -----------------------------------------------------------------------------
+// Transaction listing + categorization
+//
+// Used by the classify pipeline (cmd/classify, internal/classify). Lists card
+// transactions in a date range, lists/creates org-wide expense categories, and
+// PATCHes a transaction's category + note. See docs/classification.md for the
+// full flow.
+// -----------------------------------------------------------------------------
+
+const mercuryListTransactionsLimit = 1000
+
+// MercuryTransactionLite is the subset of Mercury's transaction fields the
+// classify pipeline reads. Mercury returns many more fields; unmodelled ones
+// are silently dropped by the JSON decoder, which is fine — adding new fields
+// later only requires updating this struct.
+type MercuryTransactionLite struct {
+	ID              string                 `json:"id"`
+	Amount          float64                `json:"amount"`
+	BankDescription string                 `json:"bankDescription"`
+	Status          string                 `json:"status"`
+	Kind            string                 `json:"kind"`
+	Note            string                 `json:"note"`
+	CreatedAt       string                 `json:"createdAt"`
+	MercuryCategory string                 `json:"mercuryCategory"` // Mercury's built-in enum (Restaurants, Software, ...)
+	CategoryData    *MercuryCategoryData   `json:"categoryData"`    // null when no custom category set
+	Merchant        *MercuryMerchantData   `json:"merchant"`        // null for non-card transactions or where Mercury hasn't resolved a merchant
+	DashboardLink   string                 `json:"dashboardLink"`
+}
+
+// MercuryCategoryData is the org-wide custom category currently assigned to a
+// transaction. CategoryID is what /transaction/{id} PATCH expects.
+type MercuryCategoryData struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// MercuryMerchantData is Mercury's resolved merchant identity for a card
+// transaction. Useful as context for the classifier; not all transactions
+// have it.
+type MercuryMerchantData struct {
+	Name string `json:"name"`
+}
+
+// MercuryCategory is an org-wide expense category. Returned by GET /categories
+// and POST /categories.
+type MercuryCategory struct {
+	ID                     string `json:"id"`
+	Name                   string `json:"name"`
+	VisibleForCardSpend    bool   `json:"visibleForCardSpend"`
+	VisibleForOther        bool   `json:"visibleForOther"`
+	VisibleForReimbursements bool `json:"visibleForReimbursements"`
+}
+
+type mercuryListTransactionsResponse struct {
+	Transactions []MercuryTransactionLite `json:"transactions"`
+	Total        int                      `json:"total"`
+}
+
+type mercuryListCategoriesResponse struct {
+	Categories []MercuryCategory `json:"categories"`
+}
+
+// mercuryCreateCategoryPayload is the body of POST /categories. Mercury
+// requires all three visibility flags — omitting any of them returns
+// `invalidApiArgs` (the spec says they're optional but the server
+// disagrees). We default everything to true so the seeded categories
+// show up across card spend, reimbursements, and other transaction types.
+type mercuryCreateCategoryPayload struct {
+	Name                     string `json:"name"`
+	VisibleForCardSpend      bool   `json:"visibleForCardSpend"`
+	VisibleForOther          bool   `json:"visibleForOther"`
+	VisibleForReimbursements bool   `json:"visibleForReimbursements"`
+}
+
+type mercuryUpdateTransactionPayload struct {
+	CategoryID *string `json:"categoryId,omitempty"`
+	Note       *string `json:"note,omitempty"`
+}
+
+// ListTransactionsInPeriod returns every Mercury transaction with createdAt
+// in [from, to] inclusive. Both dates are formatted YYYY-MM-DD. Errors hard
+// if the response hits the page limit — Mercury's /transactions endpoint
+// caps each response and this code does not yet implement cursor pagination.
+// Volume is well under the limit for current YumYums usage; revisit when
+// transaction counts grow.
+func (c *MercuryClient) ListTransactionsInPeriod(from, to time.Time) ([]MercuryTransactionLite, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/transactions", nil)
+	if err != nil {
+		return nil, fmt.Errorf("mercury ListTransactionsInPeriod: failed to create request: %w", err)
+	}
+	q := req.URL.Query()
+	q.Set("start", from.Format("2006-01-02"))
+	q.Set("end", to.Format("2006-01-02"))
+	req.URL.RawQuery = q.Encode()
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mercury ListTransactionsInPeriod: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mercury ListTransactionsInPeriod: %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	var envelope mercuryListTransactionsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("mercury ListTransactionsInPeriod: failed to decode response: %w", err)
+	}
+	if len(envelope.Transactions) >= mercuryListTransactionsLimit {
+		return nil, fmt.Errorf("mercury ListTransactionsInPeriod: response hit page limit (%d) — implement pagination", mercuryListTransactionsLimit)
+	}
+	return envelope.Transactions, nil
+}
+
+// ListCategories returns every org-wide custom expense category.
+func (c *MercuryClient) ListCategories() ([]MercuryCategory, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/categories", nil)
+	if err != nil {
+		return nil, fmt.Errorf("mercury ListCategories: failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mercury ListCategories: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mercury ListCategories: %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	var envelope mercuryListCategoriesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("mercury ListCategories: failed to decode response: %w", err)
+	}
+	return envelope.Categories, nil
+}
+
+// CreateCategory creates a new org-wide custom expense category with the
+// given name. Returns the created category (Mercury assigns the id).
+// All three visibility flags default to true so the category is usable
+// against every transaction kind.
+func (c *MercuryClient) CreateCategory(name string) (*MercuryCategory, error) {
+	body, err := json.Marshal(mercuryCreateCategoryPayload{
+		Name:                     name,
+		VisibleForCardSpend:      true,
+		VisibleForOther:          true,
+		VisibleForReimbursements: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mercury CreateCategory: failed to marshal payload: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/categories", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("mercury CreateCategory: failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mercury CreateCategory: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("mercury CreateCategory: %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	var category MercuryCategory
+	if err := json.NewDecoder(resp.Body).Decode(&category); err != nil {
+		return nil, fmt.Errorf("mercury CreateCategory: failed to decode response: %w", err)
+	}
+	return &category, nil
+}
+
+// UpdateTransaction PATCHes a single transaction's category and note.
+// Pass empty strings to leave a field unchanged (Mercury's API treats an
+// omitted field as "no change"; sending an explicit null clears the field —
+// neither is what we want here). Both fields are normally set together by
+// the classify pipeline.
+func (c *MercuryClient) UpdateTransaction(transactionID, categoryID, note string) error {
+	payload := mercuryUpdateTransactionPayload{}
+	if categoryID != "" {
+		payload.CategoryID = &categoryID
+	}
+	if note != "" {
+		payload.Note = &note
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("mercury UpdateTransaction: failed to marshal payload: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/transaction/%s", c.baseURL, transactionID)
+	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("mercury UpdateTransaction: failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("mercury UpdateTransaction: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("mercury UpdateTransaction %s: %d: %s", transactionID, resp.StatusCode, readErrorBody(resp))
+	}
+	return nil
+}

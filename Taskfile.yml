@@ -1,0 +1,62 @@
+version: "3"
+
+# sales-processor — task entry points
+#
+# The primary task is `payroll` (the full weekly run, including Mercury
+# classification + transfers and the COGS section). Other tasks expose
+# individual phases of the classify pipeline for debugging or one-off
+# reruns when something needs hand-editing between phases.
+
+tasks:
+  default:
+    desc: List all tasks
+    cmds:
+      - task --list-all
+
+  payroll:
+    desc: Run the full weekly payroll pipeline (classify → COGS → PDF → transfers)
+    cmds:
+      - go run main.go {{.CLI_ARGS}}
+
+  payroll:preview:
+    desc: Preview the PDF without touching Mercury (no transfers, no classification)
+    cmds:
+      - go run main.go --skip-mercury {{.CLI_ARGS}}
+
+  payroll:no-classify:
+    desc: Full run but skip the classify step (use when Claude is unavailable)
+    cmds:
+      - go run main.go --skip-classify {{.CLI_ARGS}}
+
+  # ---------------------------------------------------------------------------
+  # Classify pipeline — debug targets
+  #
+  # The weekly `payroll` task runs all three phases in sequence. These targets
+  # let an operator re-run a single phase against an existing cache file, e.g.
+  # after hand-editing proposals_<to>.json before apply.
+  # ---------------------------------------------------------------------------
+
+  classify:pull:
+    desc: "Snapshot Mercury card txs + categories → output/classify/transactions_<to>.json (vars: FROM, TO)"
+    cmds:
+      - go run ./cmd/classify pull --from {{.FROM}} --to {{.TO}}
+
+  classify:analyze:
+    desc: "Invoke Claude to classify the most recent snapshot (var: TO)"
+    cmds:
+      - 'claude "$(go run ./cmd/classify prompt --to {{.TO}})"'
+
+  classify:apply:
+    desc: "Read proposals_<to>.json → PATCH Mercury → archive (var: TO)"
+    cmds:
+      - go run ./cmd/classify apply --to {{.TO}}
+
+  classify:
+    desc: "Full classify pipeline (pull → analyze → apply) for a given period (vars: FROM, TO)"
+    cmds:
+      - task: classify:pull
+        vars: { FROM: "{{.FROM}}", TO: "{{.TO}}" }
+      - task: classify:analyze
+        vars: { TO: "{{.TO}}" }
+      - task: classify:apply
+        vars: { TO: "{{.TO}}" }

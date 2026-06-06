@@ -13,7 +13,8 @@ go run main.go [flags]
 | `--sandbox` | bool | `false` | Use Mercury's sandbox environment. Also routes env-file writes to `.env.sandbox` instead of `.env` |
 | `--auto-approve-transfers` | bool | `false` | Skip the y/n prompt before dispatching each transfer batch |
 | `--force-resend` | string | `""` | Comma-separated list of transfer kinds to clear from the ledger before this run. Accepts `sales_tax`, `deferred_taxes`, `rent_hold`, or `all` |
-| `--skip-mercury` | bool | `false` | Preview mode: bypass Mercury account/recipient resolution and transfer dispatch. The PDF/CSV still render (including the COGS section when HQ is configured), but no transfers are planned, executed, or ledger-recorded. Use when iterating on report formatting without reachable Mercury (offline dev, blocked IP, etc.) |
+| `--skip-mercury` | bool | `false` | Preview mode: bypass Mercury account/recipient resolution, transfer dispatch, AND the classify pipeline (classify needs the Mercury client). The PDF/CSV still render. Use when iterating on report formatting without reachable Mercury (offline dev, blocked IP, etc.) |
+| `--skip-classify` | bool | `false` | Run Mercury transfers but skip the Claude-based classify pipeline. Use when `claude` CLI is unavailable on the host (e.g., a prod cron without Claude Code installed). See [classification.md](classification.md) for full pipeline details. |
 
 Removed (and intentionally not reintroduced):
 - `--rent-hold-method` — replaced by `MERCURY_RENT_HOLD_METHOD` env var
