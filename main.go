@@ -1490,7 +1490,7 @@ func main() {
 		}
 	}
 
-	pdfPath := writePDF(reportOutput.String(), previousFromDate, toDate)
+	pdfPath := writePDF(reportOutput.String(), fromDate, toDate)
 
 	csvPath := fmt.Sprintf("output/payroll/payroll_%v.csv", toDate)
 	f, err := os.Create(csvPath)
