@@ -1873,9 +1873,25 @@ func formatHQCompletenessFailure(hqBaseURL string, s *external.HQPeriodSummary) 
 	fmt.Fprintf(&b, "  %d. Re-run sales-processor.\n\n", step)
 
 	if pending > 0 {
-		b.WriteString("Pending IDs (for debugging):\n")
-		for _, id := range s.Completeness.PendingReviewIDs {
-			fmt.Fprintf(&b, "  - %s\n", id)
+		if len(s.Completeness.PendingReviewDetails) > 0 {
+			b.WriteString("Pending receipts:\n")
+			for _, d := range s.Completeness.PendingReviewDetails {
+				reasonSuffix := ""
+				if d.Reason != nil && *d.Reason != "" {
+					reasonSuffix = "  (" + humanizePendingReason(*d.Reason) + ")"
+				}
+				vendor := d.Vendor
+				if vendor == "" {
+					vendor = "(vendor unknown)"
+				}
+				fmt.Fprintf(&b, "  - %s  %-22s  $%.2f%s\n", d.EventDate, vendor, d.BankTotal, reasonSuffix)
+			}
+		} else {
+			// Older HQ (pre cogs-hq-pending-details handoff) — only UUIDs available.
+			b.WriteString("Pending IDs (HQ doesn't expose details yet — update HQ to render vendor/date/$):\n")
+			for _, id := range s.Completeness.PendingReviewIDs {
+				fmt.Fprintf(&b, "  - %s\n", id)
+			}
 		}
 	}
 	if unlinked > 0 {
@@ -1885,6 +1901,23 @@ func formatHQCompletenessFailure(hqBaseURL string, s *external.HQPeriodSummary) 
 		}
 	}
 	return b.String()
+}
+
+// humanizePendingReason turns HQ's enum-ish reason strings into a short
+// human-readable phrase for the failure banner. Unknown reasons pass
+// through unchanged so they still convey *something* — better than
+// dropping them silently.
+func humanizePendingReason(reason string) string {
+	switch reason {
+	case "no_attachment_on_bank_tx":
+		return "no receipt attached"
+	case "receipt_parse_failed", "Receipt could not be parsed automatically":
+		return "receipt couldn't be parsed"
+	case "Receipt could not be saved automatically":
+		return "receipt save failed"
+	default:
+		return reason
+	}
 }
 
 // formatMercuryGapFailure renders the operator-friendly banner for the

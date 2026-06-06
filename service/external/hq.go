@@ -48,10 +48,28 @@ type HQVendorCOGS struct {
 // HQCompletenessBlock describes whether HQ has fully ingested + reviewed
 // + catalog-linked every receipt that falls in the period. Ready is true
 // iff both ID slices are empty.
+//
+// PendingReviewDetails is parallel to PendingReviewIDs but each entry
+// carries vendor / date / amount so the fail-fast banner can render
+// operator-friendly rows. Older HQ deployments (pre cogs-hq-pending-details)
+// omit it — consumers should fall back to PendingReviewIDs in that case.
 type HQCompletenessBlock struct {
-	Ready               bool     `json:"ready"`
-	PendingReviewIDs    []string `json:"pending_review_ids"`
-	UnlinkedLineItemIDs []string `json:"unlinked_line_item_ids"`
+	Ready                bool                    `json:"ready"`
+	PendingReviewIDs     []string                `json:"pending_review_ids"`
+	PendingReviewDetails []HQPendingReviewDetail `json:"pending_review_details,omitempty"`
+	UnlinkedLineItemIDs  []string                `json:"unlinked_line_item_ids"`
+}
+
+// HQPendingReviewDetail mirrors HQ's pending_purchases row, scoped to
+// the fields the sales-processor failure banner needs to render a
+// human-readable row.
+type HQPendingReviewDetail struct {
+	ID        string  `json:"id"`
+	BankTxID  string  `json:"bank_tx_id"`
+	Vendor    string  `json:"vendor"`     // "" when the receipt parser couldn't extract one
+	EventDate string  `json:"event_date"` // YYYY-MM-DD; HQ falls back to created_at::date
+	BankTotal float64 `json:"bank_total"`
+	Reason    *string `json:"reason,omitempty"`
 }
 
 type HQClient struct {
