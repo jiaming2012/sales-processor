@@ -1155,7 +1155,7 @@ func main() {
 	// HQ access aren't blocked. When set, an incomplete period (pending
 	// receipts or unlinked line items) is treated as a hard failure —
 	// food cost numbers would be misleading.
-	hqSummary := fetchHQPeriodSummary(dates[0], dates[len(dates)-1])
+	hqSummary := fetchHQPeriodSummary(mercuryClient, dates[0], dates[len(dates)-1])
 
 	//--- Report Headers (Previous Timesheet) ---
 	lastWeek := now.AddDate(0, 0, -7)
@@ -1772,7 +1772,14 @@ func classifyMercuryTransactions(client *external.MercuryClient, from, to time.T
 // (HTTP error, decode error, or incomplete data) it terminates the run via
 // log.Fatalf — the alternative is publishing a payroll PDF with silently
 // wrong food cost numbers.
-func fetchHQPeriodSummary(from, to time.Time) *external.HQPeriodSummary {
+//
+// mercuryClient is used for the Mercury↔HQ gap check that catches card
+// transactions Mercury has surfaced but HQ's receipt worker hasn't
+// ingested yet (see docs/payroll-mercury-gap-check.md). Pass nil to skip
+// the gap check — appropriate when --skip-mercury is set and Mercury
+// isn't reachable. In that mode COGS still ships but the late-arriving
+// transaction class becomes blind.
+func fetchHQPeriodSummary(mercuryClient *external.MercuryClient, from, to time.Time) *external.HQPeriodSummary {
 	client, err := external.NewHQClientFromEnv()
 	if err != nil {
 		log.Fatalf("init HQ client: %v", err)
@@ -1797,6 +1804,48 @@ func fetchHQPeriodSummary(from, to time.Time) *external.HQPeriodSummary {
 			summary.Completeness.PendingReviewIDs,
 			summary.Completeness.UnlinkedLineItemIDs,
 		)
+	}
+
+	// Mercury↔HQ gap check: Mercury sees card transactions the moment the
+	// bank acks them; HQ only sees transactions its receipt worker has
+	// polled. completeness.ready=true above means HQ has no unresolved
+	// rows — but says nothing about transactions HQ hasn't ingested yet.
+	// Cross-check Mercury against HQ's tracked_bank_tx_ids and fail-fast
+	// on any gap so Restaurant Depot doesn't silently vanish from COGS.
+	if mercuryClient == nil {
+		log.Warn("Mercury client unavailable (--skip-mercury) — skipping Mercury↔HQ gap check")
+		return summary
+	}
+	if summary.TrackedBankTxIDs == nil {
+		log.Warnf(
+			"HQ /period-summary response missing tracked_bank_tx_ids — "+
+				"Mercury sync gap check is DEGRADED. Update HQ to ship the "+
+				"cogs-hq-tracked-tx-ids change to re-enable. Proceeding for %s–%s.",
+			summary.From, summary.To,
+		)
+		return summary
+	}
+
+	txns, err := mercuryClient.ListTransactionsInPeriod(from, to)
+	if err != nil {
+		log.Fatalf("fetch Mercury transactions for HQ gap check: %v", err)
+	}
+
+	gap := external.MercuryHQGap(txns, summary.TrackedBankTxIDs)
+	if len(gap) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b,
+			"Mercury has %d card transaction(s) HQ's receipt worker hasn't ingested yet for %s–%s. "+
+				"Wait for the next receipt-worker poll (~6h) and re-run, or kick the worker manually.\n",
+			len(gap), summary.From, summary.To,
+		)
+		for _, tx := range gap {
+			fmt.Fprintf(&b,
+				"  - %s  $%.2f  %s  (%s)  %s\n",
+				tx.CreatedAt, tx.Amount, tx.BankDescription, tx.ID, tx.DashboardLink,
+			)
+		}
+		log.Fatal(b.String())
 	}
 
 	return summary

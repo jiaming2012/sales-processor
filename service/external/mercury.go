@@ -412,6 +412,48 @@ type mercuryUpdateTransactionPayload struct {
 	Note       *string `json:"note,omitempty"`
 }
 
+// IsSupportedCardKind reports whether a Mercury transaction Kind is one
+// of the card/debit-card kinds HQ's receipt worker ingests into
+// purchase_events / pending_purchases. The payroll gap check uses this
+// to filter Mercury's transaction list before diffing against HQ's
+// tracked_bank_tx_ids. Keep in sync with
+// hq/backend/internal/receipt/mercury.go:isSupportedKind.
+func IsSupportedCardKind(kind string) bool {
+	switch kind {
+	case "creditCardTransaction", "debitCardTransaction",
+		"creditCardCredit", "debitCardCredit":
+		return true
+	}
+	return false
+}
+
+// MercuryHQGap returns the Mercury transactions in txns that (a) are
+// supported card kinds, (b) have status="sent", and (c) are not present
+// in trackedIDs. It's the read-only diff at the core of the payroll
+// gap check — Mercury knows every card swipe immediately; HQ only knows
+// what its receipt worker has polled. A non-empty return means HQ has
+// missed something and the payroll PDF would silently undercount COGS.
+func MercuryHQGap(txns []MercuryTransactionLite, trackedIDs []string) []MercuryTransactionLite {
+	trackedSet := make(map[string]struct{}, len(trackedIDs))
+	for _, id := range trackedIDs {
+		trackedSet[id] = struct{}{}
+	}
+	var gap []MercuryTransactionLite
+	for _, tx := range txns {
+		if tx.Status != "sent" {
+			continue
+		}
+		if !IsSupportedCardKind(tx.Kind) {
+			continue
+		}
+		if _, seen := trackedSet[tx.ID]; seen {
+			continue
+		}
+		gap = append(gap, tx)
+	}
+	return gap
+}
+
 // ListTransactionsInPeriod returns every Mercury transaction with createdAt
 // in [from, to] inclusive. Both dates are formatted YYYY-MM-DD. Errors hard
 // if the response hits the page limit — Mercury's /transactions endpoint

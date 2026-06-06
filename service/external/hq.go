@@ -20,13 +20,20 @@ const (
 // ByVendor is optional — older HQ deployments don't return it. The COGS
 // section in the payroll report degrades to the aggregate-only view when
 // the slice is nil/empty.
+//
+// TrackedBankTxIDs lists every Mercury bank_tx_id HQ has touched for the
+// period across all states (confirmed/pending/discarded). The payroll
+// gap check in fetchHQPeriodSummary diffs Mercury's transaction list
+// against this set; nil (omitted by older HQ) drops the check to a
+// warning-only degraded mode so deploy ordering doesn't break runs.
 type HQPeriodSummary struct {
-	From               string             `json:"from"`
-	To                 string             `json:"to"`
-	COGSExclTax        float64            `json:"cogs_excl_tax"`
-	COGSInclTax        float64            `json:"cogs_incl_tax"`
-	PurchaseEventCount int                `json:"purchase_event_count"`
-	ByVendor           []HQVendorCOGS     `json:"by_vendor,omitempty"`
+	From               string              `json:"from"`
+	To                 string              `json:"to"`
+	COGSExclTax        float64             `json:"cogs_excl_tax"`
+	COGSInclTax        float64             `json:"cogs_incl_tax"`
+	PurchaseEventCount int                 `json:"purchase_event_count"`
+	ByVendor           []HQVendorCOGS      `json:"by_vendor,omitempty"`
+	TrackedBankTxIDs   []string            `json:"tracked_bank_tx_ids,omitempty"`
 	Completeness       HQCompletenessBlock `json:"completeness"`
 }
 
