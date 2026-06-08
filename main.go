@@ -824,19 +824,24 @@ func executeTransfers(mercuryClient *external.MercuryClient, sourceAccount exter
 		}
 		fmt.Printf("  $%.2f from %s → %s (%s)\n", t.Amount, sourceAccount.Name, dest, t.Note)
 	}
-
-	if !autoApprove {
-		fmt.Printf("\nExecute %d transfer(s)? (y/n): ", len(transfers))
-		var answer string
-		fmt.Scanln(&answer)
-
-		if strings.ToLower(answer) != "y" {
-			fmt.Println("Transfers skipped.")
-			return outcomes
-		}
-	}
+	fmt.Println()
 
 	for i, t := range transfers {
+		dest := t.ToAccountName
+		if dest == "" {
+			dest = t.ToAccountID
+		}
+
+		if !autoApprove {
+			fmt.Printf("Send $%.2f → %s (%s)? (y/n): ", t.Amount, dest, t.Note)
+			var answer string
+			fmt.Scanln(&answer)
+			if strings.ToLower(answer) != "y" {
+				fmt.Printf("  Skipped: %s\n", t.Note)
+				continue
+			}
+		}
+
 		err := mercuryClient.CreateInternalTransfer(t)
 		outcomes[i] = transferOutcome{Attempted: true, Sent: err == nil, Err: err}
 		if err != nil {
