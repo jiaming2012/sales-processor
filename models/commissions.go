@@ -125,7 +125,7 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 	netPay := preTaxPay - s.Taxes
 	output.WriteString(fmt.Sprintf("\nPretax Pay: $%.2f\n", preTaxPay))
 	output.WriteString(fmt.Sprintf("Taxes: -$%.2f\n", s.Taxes))
-	output.WriteString(fmt.Sprintf("Net Pay: $%.2f\n", netPay))
+	output.WriteString(fmt.Sprintf("\nNet Pay: $%.2f\n", netPay))
 
 	if s.RentHold > 0 {
 		output.WriteString(fmt.Sprintf("\nRent Hold: -$%.2f\n", s.RentHold))
