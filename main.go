@@ -1355,12 +1355,12 @@ func main() {
 		reportOutput.WriteString("No voided orders.\n")
 	} else {
 		for _, v := range weeklySummary.VoidedOrders {
-			tab := v.TabNames
-			if tab == "" {
-				tab = "(no tab)"
-			}
 			opened := v.Opened.Format("01/02 3:04 PM")
-			reportOutput.WriteString(fmt.Sprintf("Order #%d - %s - %s: $%.2f\n", v.OrderNumber, opened, tab, v.Amount))
+			if v.TabNames == "" {
+				reportOutput.WriteString(fmt.Sprintf("  Order #%d - %s: $%.2f\n", v.OrderNumber, opened, v.Amount))
+			} else {
+				reportOutput.WriteString(fmt.Sprintf("  Order #%d - %s - %s: $%.2f\n", v.OrderNumber, opened, v.TabNames, v.Amount))
+			}
 		}
 	}
 	reportOutput.WriteString(fmt.Sprintf("Total Voided: $%.2f\n", weeklySummary.VoidedTotal))
@@ -1724,6 +1724,14 @@ func parsePdfTableRow(line string) (pdfTableRow, bool) {
 	content := line[indent:]
 	idx := strings.Index(content, ":")
 	if idx <= 0 || idx >= len(content)-1 {
+		return pdfTableRow{}, false
+	}
+	// Reject sentence-like lines that happen to contain a colon (e.g. voided
+	// orders with embedded timestamps: "Order #2 - 05/28 12:34 PM - $0.00").
+	// True table labels are short noun phrases without "X - Y" segments — the
+	// time-colon would otherwise be misread as the label/value boundary and
+	// render with a giant column gap between the hour and minute.
+	if strings.Contains(content[:idx], " - ") {
 		return pdfTableRow{}, false
 	}
 	label := strings.TrimSpace(content[:idx]) + ":"
