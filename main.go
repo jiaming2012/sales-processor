@@ -430,7 +430,7 @@ func CalcTipShare(durationWorked time.Duration) int {
 // 4 - 6 -> 66%
 // 2 - 4 -> 33%
 // <2 -> 0%
-func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours, previousEmployeeHours []models.EmployeeHours, cashEmployeesPay []models.CashEmployeePay, tipsWithheldPercentage float64) models.WeeklySummary {
+func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesheet models.Timesheet, employeeHours []models.EmployeeHours, previousEmployeeHours []models.EmployeeHours, payrollThisCycleHours []models.EmployeeHours, cashEmployeesPay []models.CashEmployeePay, tipsWithheldPercentage float64) models.WeeklySummary {
 	var tipDetails models.TipDetails
 	tipDetails.Details = make(map[models.Employee]float64)
 	totalSales := 0.0
@@ -488,7 +488,7 @@ func CalculateWeeklyReport(dailyReport map[time.Time]models.DailySummary, timesh
 		VoidedTotal:      voidedTotal,
 		VoidedOrders:     voidedOrders,
 		Hours:            employeeHours,
-		PreviousHours:    previousEmployeeHours,
+		PayrollThisCycle: payrollThisCycleHours,
 		CashEmployeesPay: cashEmployeesPay,
 	}
 }
@@ -1013,6 +1013,7 @@ func main() {
 	skipMercury := flag.Bool("skip-mercury", false, "skip Mercury account resolution and transfer dispatch (preview mode — no bank movement)")
 	skipClassify := flag.Bool("skip-classify", false, "skip the Mercury transaction classify pipeline (Pull → Claude → Apply)")
 	weeksAgo := flag.Int("weeks-ago", 0, "process the pay period N weeks before the current one (0 = current week, 1 = last week, ...)")
+	skipScheduleWarning := flag.Bool("skip-schedule-warning", false, "silence the interactive warning when an hourly employee has ≥3 months tenure but no 'primary pay schedule' tag in Sling")
 	flag.Parse()
 
 	weeksAgoSet := false
@@ -1075,18 +1076,8 @@ func main() {
 		},
 	}
 
-	commissionBasedEmployees := []models.CommissionBasedEmployee{
-		{
-			Id:                       100,
-			Name:                     "Jamal Cole",
-			CommissionSalesStructure: commissionSalesStructureOwner,
-		},
-		{
-			Id:                       101,
-			Name:                     "Latanya Mcgriff",
-			CommissionSalesStructure: commissionSalesStructureStandard,
-		},
-	}
+	// commissionBasedEmployees is populated below from Sling tags once the
+	// user set is fetched; previously hardcoded here.
 
 	//cashWithdrawalResponsesID := "1v3mSj-ZeKcDkplaAZBuva1dVOe7_Hf9O9z2o8YW_zfk"
 	exclusions := []models.TipExclusion{
@@ -1217,6 +1208,77 @@ func main() {
 	fromDate := dates[0].Format("2006-01-02")
 	toDate := dates[len(dates)-1].Format("2006-01-02")
 
+	//--- Sling client + user validation (run before the ~90s classify
+	// pipeline so missing hireDate / wage / employeeId fails fast).
+	slingClient, err := external.NewSlingTimesheet(baseURL, slingEmail, slingPassword)
+	if err != nil {
+		panic(err)
+	}
+
+	if err = slingClient.PopulateUsers(); err != nil {
+		panic(err)
+	}
+
+	// Build commission-based employee set from Sling tags:
+	//   - "commission" tag → included in the commission flow
+	//   - "owner" tag      → owner structure (0%), suppressed from cost
+	//                        aggregation and per-employee breakdown
+	//   - "commission" alone → standard tiered structure
+	var commissionBasedEmployees []models.CommissionBasedEmployee
+	for _, u := range slingClient.Users() {
+		if !u.HasTag(models.TagCommission) {
+			continue
+		}
+		structure := commissionSalesStructureStandard
+		isOwner := u.HasTag(models.TagOwner)
+		if isOwner {
+			structure = commissionSalesStructureOwner
+		}
+		commissionBasedEmployees = append(commissionBasedEmployees, models.CommissionBasedEmployee{
+			Id:                       u.EmployeeID,
+			Name:                     u.Name(),
+			CommissionSalesStructure: structure,
+			IsOwner:                  isOwner,
+		})
+	}
+
+	// Schedule warning: any hourly employee (not commission, not owner) with
+	// ≥3 months tenure who isn't tagged 'primary pay schedule' is still on
+	// the new-employee (held) schedule. Surface a single batched y/n so the
+	// operator can either go tag them in Sling (n → abort) or proceed.
+	// Silenced by --skip-schedule-warning for unattended runs.
+	if !*skipScheduleWarning {
+		payPeriodEnd := dates[len(dates)-1]
+		var overdue []string
+		for _, u := range slingClient.Users() {
+			if u.HasTag(models.TagCommission) || u.HasTag(models.TagOwner) {
+				continue
+			}
+			if u.IsPrimarySchedule() {
+				continue
+			}
+			if u.TenureAtLeastMonths(payPeriodEnd, models.PrimaryScheduleAge) {
+				overdue = append(overdue, fmt.Sprintf("%s (%s)", u.Name(), u.Tenure(payPeriodEnd)))
+			}
+		}
+		if len(overdue) > 0 {
+			sort.Strings(overdue)
+			fmt.Printf("\nWARNING: %d hourly employee(s) have ≥%d months tenure but no '%s' tag in Sling:\n",
+				len(overdue), models.PrimaryScheduleAge, models.TagPrimarySchedule)
+			for _, line := range overdue {
+				fmt.Printf("  - %s\n", line)
+			}
+			fmt.Printf("These employees will continue on the new-employee schedule (1-week pay hold).\n")
+			fmt.Printf("To put them on the primary schedule, add the '%s' tag in Sling and re-run.\n", models.TagPrimarySchedule)
+			fmt.Print("Exit so you can tag them in Sling first? (y/n): ")
+			var response string
+			fmt.Scanln(&response)
+			if strings.ToLower(strings.TrimSpace(response)) == "y" {
+				log.Fatalf("aborted by operator — tag the listed employees in Sling and re-run, or pass --skip-schedule-warning")
+			}
+		}
+	}
+
 	//--- Mercury Transaction Classification (Claude via CLI) ---
 	// Pull every card tx in the pay period, hand the snapshot to Claude via
 	// the `claude` CLI (one-shot session), then PATCH Mercury with the
@@ -1243,15 +1305,6 @@ func main() {
 	previousToDate := previousDates[len(previousDates)-1].Format("2006-01-02")
 
 	//--- Fetch Timesheets
-	slingClient, err := external.NewSlingTimesheet(baseURL, slingEmail, slingPassword)
-	if err != nil {
-		panic(err)
-	}
-
-	if err = slingClient.PopulateUsers(commissionBasedEmployees); err != nil {
-		panic(err)
-	}
-
 	currentTimesheet, err := slingClient.GetPayroll(fromDate, toDate)
 	if err != nil {
 		panic(err)
@@ -1264,13 +1317,14 @@ func main() {
 
 	//--- Process Timesheets ---
 	var employeeHours []models.EmployeeHours
-	for user, i := range currentTimesheet {
-		if user.CommissionSalesStructure != nil {
+	for _, entry := range currentTimesheet {
+		user := entry.User
+		if user.HasTag(models.TagCommission) {
 			log.Debugf("skip summing hours for commission based employee %v", user)
 			continue
 		}
 
-		hours, err := external.SlingTimesheetItemShifts(i).GetTotalHours()
+		hours, err := external.SlingTimesheetItemShifts(entry.Shifts).GetTotalHours()
 		if err != nil {
 			panic(err)
 		}
@@ -1282,13 +1336,14 @@ func main() {
 	}
 
 	var previousEmployeeHours []models.EmployeeHours
-	for user, i := range previousTimesheet {
-		if user.CommissionSalesStructure != nil {
+	for _, entry := range previousTimesheet {
+		user := entry.User
+		if user.HasTag(models.TagCommission) {
 			log.Debugf("skip summing hours for commission based employee %v", user)
 			continue
 		}
 
-		hours, err := external.SlingTimesheetItemShifts(i).GetTotalHours()
+		hours, err := external.SlingTimesheetItemShifts(entry.Shifts).GetTotalHours()
 		if err != nil {
 			panic(err)
 		}
@@ -1297,6 +1352,40 @@ func main() {
 			Employee: user,
 			Hours:    hours,
 		})
+	}
+
+	// Build payrollThisCycleHours: what we actually pay out this cycle.
+	// Primary-scheduled employees → their current-week hours.
+	// Held (new-employee) staff → their previous-week hours.
+	// Held employees with no previous-week hours (e.g., very first week)
+	// are simply absent from the payout this cycle.
+	currentHoursByID := make(map[int]models.EmployeeHours, len(employeeHours))
+	for _, eh := range employeeHours {
+		currentHoursByID[eh.Employee.EmployeeID] = eh
+	}
+	previousHoursByID := make(map[int]models.EmployeeHours, len(previousEmployeeHours))
+	for _, eh := range previousEmployeeHours {
+		previousHoursByID[eh.Employee.EmployeeID] = eh
+	}
+	seen := make(map[int]struct{})
+	var payrollThisCycleHours []models.EmployeeHours
+	for _, eh := range employeeHours {
+		seen[eh.Employee.EmployeeID] = struct{}{}
+		if eh.Employee.IsPrimarySchedule() {
+			payrollThisCycleHours = append(payrollThisCycleHours, eh)
+		} else if held, ok := previousHoursByID[eh.Employee.EmployeeID]; ok {
+			payrollThisCycleHours = append(payrollThisCycleHours, held)
+		}
+	}
+	// Held employees who didn't work the current week but did work last
+	// week still get paid this cycle for that prior work.
+	for _, eh := range previousEmployeeHours {
+		if _, already := seen[eh.Employee.EmployeeID]; already {
+			continue
+		}
+		if !eh.Employee.IsPrimarySchedule() {
+			payrollThisCycleHours = append(payrollThisCycleHours, eh)
+		}
 	}
 
 	dailyReport := make(map[time.Time]models.DailySummary)
@@ -1333,7 +1422,7 @@ func main() {
 		panic(err)
 	}
 
-	weeklySummary := CalculateWeeklyReport(dailyReport, ts, employeeHours, previousEmployeeHours, cashEmployeeWages, tipsWithheldPercentage)
+	weeklySummary := CalculateWeeklyReport(dailyReport, ts, employeeHours, previousEmployeeHours, payrollThisCycleHours, cashEmployeeWages, tipsWithheldPercentage)
 
 	//--- todo: wait for manual input
 
@@ -1343,11 +1432,11 @@ func main() {
 	// section can show a "Commission Employees Cost / Sales" line above
 	// the per-employee Sales Commission Breakdown below. Tips are excluded
 	// from the aggregate cost (they come from customers, not the business);
-	// Jamal is excluded because he's the owner at 0% commission and isn't
-	// counted as a wage cost. The per-employee loop below reconstructs the
-	// summaries with the same inputs — math is cheap, type is unexported.
+	// owners are excluded because they pay themselves outside payroll. The
+	// per-employee loop below reconstructs the summaries with the same
+	// inputs — math is cheap, type is unexported.
 	for _, empl := range commissionBasedEmployees {
-		if empl.Name == "Jamal Cole" {
+		if empl.IsOwner {
 			continue
 		}
 		tips := weeklySummary.Tips.Details[models.Employee(empl.Name)]
@@ -1378,10 +1467,10 @@ func main() {
 	reportOutput.WriteString(weeklySummary.ShowLaborDetail())
 	reportOutput.WriteString("\n")
 
-	reportOutput.WriteString(weeklySummary.ShowCurrentHoursDetail())
+	reportOutput.WriteString(weeklySummary.ShowHeldHoursLiability(dates[len(dates)-1]))
 	reportOutput.WriteString("\n")
 
-	reportOutput.WriteString(weeklySummary.ShowPreviousHoursDetail())
+	reportOutput.WriteString(weeklySummary.ShowPayrollThisCycle(dates[len(dates)-1], previousDates[len(previousDates)-1]))
 	reportOutput.WriteString("\n")
 
 	reportOutput.WriteString(weeklySummary.ShowTipsBreakdown())
@@ -1431,7 +1520,7 @@ func main() {
 	reportOutput.WriteString("\n")
 	for _, empl := range commissionBasedEmployees {
 		// todo: unify all employee models
-		if empl.Name == "Jamal Cole" {
+		if empl.IsOwner {
 			continue
 		}
 
@@ -1460,6 +1549,62 @@ func main() {
 		reportOutput.WriteString(commissionBasedEmployeesSummary.Show())
 		reportOutput.WriteString("\n")
 	}
+
+	log.Debug(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
+
+	log.Debug(unpaidOrdersReport.Show("Cancelled Delivery Orders"))
+	//cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
+	//if err != nil {
+	//	panic(err)
+	//}
+	//
+	//cash := models.CashWithdrawals(cashWithdrawals)
+	//for employee, amount := range cash.Sum() {
+	//	fmt.Printf("%v: $%.2f\n", employee, amount)
+	//}
+
+	//--- Export to CSV ---
+	var entries []payroll.Entry
+	for _, empl := range weeklySummary.Hours {
+		entries = append(entries, payroll.Entry{
+			Type:           payroll.PayItem,
+			PayID:          payroll.Regular,
+			EmployeeNumber: empl.Employee.EmployeeID,
+			HoursAmount:    empl.Hours,
+			Rate:           empl.Employee.Rate,
+			TreatAsCash:    payroll.RequiresHours,
+			CashAmount:     "",
+		})
+
+		// todo: make employee conversion less janky
+		employee := models.Employee(empl.Employee.Name())
+		tip := weeklySummary.Tips.Details[employee]
+		if tip > 0 {
+			entries = append(entries, payroll.Entry{
+				Type:           payroll.PayItem,
+				PayID:          payroll.ControlledTips,
+				EmployeeNumber: empl.Employee.EmployeeID,
+				TreatAsCash:    payroll.DoesNotRequireHours,
+				CashAmount:     strconv.FormatFloat(tip, 'f', 2, 64),
+			})
+		}
+	}
+
+	pdfPath := writePDF(reportOutput.String(), fromDate, toDate)
+
+	csvPath := fmt.Sprintf("output/payroll/payroll_%v.csv", toDate)
+	f, err := os.Create(csvPath)
+	if err != nil {
+		panic(err)
+	}
+
+	if err = payroll.Entries(entries).ToCSV(f); err != nil {
+		panic(err)
+	}
+
+	fmt.Println("\n--- Output Files ---")
+	fmt.Printf("  PDF: %s\n", pdfPath)
+	fmt.Printf("  CSV: %s\n", csvPath)
 
 	//--- Mercury Transfers ---
 	// Gated by --skip-mercury: when set, the setup block above left
@@ -1567,63 +1712,17 @@ func main() {
 			log.Errorf("save transfer ledger: %v", err)
 		}
 	}
-
-	log.Debug(thirdPartyOrdersReport.Show("Paid Delivery Orders"))
-
-	log.Debug(unpaidOrdersReport.Show("Cancelled Delivery Orders"))
-	//cashWithdrawals, err := rows.ConvertToCashWithdrawals(dates[0], dates[len(dates)-1])
-	//if err != nil {
-	//	panic(err)
-	//}
-	//
-	//cash := models.CashWithdrawals(cashWithdrawals)
-	//for employee, amount := range cash.Sum() {
-	//	fmt.Printf("%v: $%.2f\n", employee, amount)
-	//}
-
-	//--- Export to CSV ---
-	var entries []payroll.Entry
-	for _, empl := range weeklySummary.Hours {
-		entries = append(entries, payroll.Entry{
-			Type:           payroll.PayItem,
-			PayID:          payroll.Regular,
-			EmployeeNumber: empl.Employee.EmployeeID,
-			HoursAmount:    empl.Hours,
-			Rate:           empl.Employee.Rate,
-			TreatAsCash:    payroll.RequiresHours,
-			CashAmount:     "",
-		})
-
-		// todo: make employee conversion less janky
-		employee := models.Employee(empl.Employee.Name())
-		tip := weeklySummary.Tips.Details[employee]
-		if tip > 0 {
-			entries = append(entries, payroll.Entry{
-				Type:           payroll.PayItem,
-				PayID:          payroll.ControlledTips,
-				EmployeeNumber: empl.Employee.EmployeeID,
-				TreatAsCash:    payroll.DoesNotRequireHours,
-				CashAmount:     strconv.FormatFloat(tip, 'f', 2, 64),
-			})
-		}
-	}
-
-	pdfPath := writePDF(reportOutput.String(), fromDate, toDate)
-
-	csvPath := fmt.Sprintf("output/payroll/payroll_%v.csv", toDate)
-	f, err := os.Create(csvPath)
-	if err != nil {
-		panic(err)
-	}
-
-	if err = payroll.Entries(entries).ToCSV(f); err != nil {
-		panic(err)
-	}
-
-	fmt.Println("\n--- Output Files ---")
-	fmt.Printf("  PDF: %s\n", pdfPath)
-	fmt.Printf("  CSV: %s\n", csvPath)
 }
+
+// pdfNonCP1252Replacer maps UTF-8 characters that aren't in cp1252 (the
+// encoding gofpdf's core Helvetica font expects) down to ASCII. cp1252
+// characters like em-dash, smart quotes, middle dot etc. are handled by
+// gofpdf's UnicodeTranslator (set up inside writePDF); this replacer only
+// catches the chars the translator can't represent.
+var pdfNonCP1252Replacer = strings.NewReplacer(
+	"≥", ">=", // U+2265 — not in cp1252
+	"≤", "<=", // U+2264 — not in cp1252
+)
 
 func writePDF(report string, fromDate string, toDate string) string {
 	const (
@@ -1636,11 +1735,18 @@ func writePDF(report string, fromDate string, toDate string) string {
 	pdf := fpdf.New("P", "mm", "A4", "")
 	pdf.AddPage()
 
+	// gofpdf's core fonts (Helvetica etc.) speak cp1252. The translator
+	// converts UTF-8 input (em-dash, middle dot, smart quotes, …) to the
+	// right cp1252 bytes. Anything outside cp1252 is normalised to ASCII
+	// by pdfNonCP1252Replacer first so the translator doesn't drop it.
+	tr := pdf.UnicodeTranslatorFromDescriptor("")
+	sanitize := func(s string) string { return tr(pdfNonCP1252Replacer.Replace(s)) }
+
 	pdf.SetFont(bodyFontFamily, "B", titleFontSize)
-	pdf.MultiCell(0, 12, fmt.Sprintf("Sales Report for %s - %s", fromDate, toDate), "", "", false)
+	pdf.MultiCell(0, 12, sanitize(fmt.Sprintf("Sales Report for %s - %s", fromDate, toDate)), "", "", false)
 	pdf.Ln(5)
 
-	renderReport(pdf, report, bodyFontFamily, bodyFontSize, headingFontSize)
+	renderReport(pdf, sanitize(report), bodyFontFamily, bodyFontSize, headingFontSize)
 
 	path := fmt.Sprintf("output/payroll/payroll_%v.pdf", toDate)
 	if err := pdf.OutputFileAndClose(path); err != nil {
