@@ -1338,14 +1338,54 @@ func main() {
 	//--- todo: wait for manual input
 
 	weeklySummary.Sales -= unpaidOrdersSummary.TotalSales
+
+	// Pre-compute the aggregate commission-based employee cost so the Labor
+	// section can show a "Commission Employees Cost / Sales" line above
+	// the per-employee Sales Commission Breakdown below. Tips are excluded
+	// from the aggregate cost (they come from customers, not the business);
+	// Jamal is excluded because he's the owner at 0% commission and isn't
+	// counted as a wage cost. The per-employee loop below reconstructs the
+	// summaries with the same inputs — math is cheap, type is unexported.
+	for _, empl := range commissionBasedEmployees {
+		if empl.Name == "Jamal Cole" {
+			continue
+		}
+		tips := weeklySummary.Tips.Details[models.Employee(empl.Name)]
+		salesCommissionPercentage, err := empl.CommissionSalesStructure.GetSalesCommissionPercentage(&weeklySummary)
+		if err != nil {
+			log.Fatal(err)
+		}
+		s := models.NewCommissionBasedEmployeesTopLineSummary(previousDates[0], previousDates[len(previousDates)-1], empl.Name, weeklySummary.Sales, tips, salesCommissionPercentage, cashHeld, weeklySummary.CashTendered, rentHoldAmount, commissionEmployeeTaxRate)
+		weeklySummary.CommissionEmployeesCost += s.GetBasePay() + s.GetCommission()
+	}
+	if hqSummary != nil {
+		weeklySummary.COGSExclTax = hqSummary.COGSExclTax
+		weeklySummary.COGSInclTax = hqSummary.COGSInclTax
+	}
+
+	// Report layout: Summary first (high-level dashboard with Operating
+	// Profit), then drill-down sections in the order the manager is
+	// likely to want them — COGS and Labor flow directly into the
+	// Operating Profit calculation, so they come first.
 	reportOutput.WriteString(weeklySummary.Show())
 	reportOutput.WriteString("\n")
 
-	//--- Cost of Goods Sold ---
 	if hqSummary != nil {
-		reportOutput.WriteString(renderCOGSSection(hqSummary, weeklySummary.Sales))
+		reportOutput.WriteString(renderCOGSSection(hqSummary))
 		reportOutput.WriteString("\n")
 	}
+
+	reportOutput.WriteString(weeklySummary.ShowLaborDetail())
+	reportOutput.WriteString("\n")
+
+	reportOutput.WriteString(weeklySummary.ShowCurrentHoursDetail())
+	reportOutput.WriteString("\n")
+
+	reportOutput.WriteString(weeklySummary.ShowPreviousHoursDetail())
+	reportOutput.WriteString("\n")
+
+	reportOutput.WriteString(weeklySummary.ShowTipsBreakdown())
+	reportOutput.WriteString("\n")
 
 	//--- Voided Orders ---
 	reportOutput.WriteString("Voided Orders\n")
@@ -2037,29 +2077,23 @@ func formatMercuryGapFailure(from, to string, gap []external.MercuryTransactionL
 	return b.String()
 }
 
-// renderCOGSSection produces the Cost of Goods Sold section in the
-// pay-period text format consumed by renderReport. netSales is the
-// post-unpaid-orders weekly figure used for the food-cost ratio.
-func renderCOGSSection(s *external.HQPeriodSummary, netSales float64) string {
+// renderCOGSSection produces the Cost of Goods Sold drill-down section.
+// Net Sales, total COGS, Food Cost %, and Operating Profit are rendered
+// up front in the Summary section; this section adds the tax breakdown,
+// receipt count, and per-vendor detail a manager would want when drilling
+// into the COGS line.
+func renderCOGSSection(s *external.HQPeriodSummary) string {
 	var out strings.Builder
-	out.WriteString("Cost of Goods Sold\n")
+	out.WriteString("Cost of Goods Sold Detail\n")
 	out.WriteString("-----------------------\n")
 	out.WriteString("\n")
 
-	foodCostPct := "n/a"
-	grossProfit := -s.COGSExclTax
-	if netSales > 0 {
-		foodCostPct = fmt.Sprintf("%.1f%%", (s.COGSExclTax/netSales)*100)
-		grossProfit = netSales - s.COGSExclTax
-	}
 	tax := s.COGSInclTax - s.COGSExclTax
 
-	out.WriteString(fmt.Sprintf("  Net Sales: $%.2f\n", netSales))
-	out.WriteString(fmt.Sprintf("  COGS: $%.2f\n", s.COGSExclTax))
-	out.WriteString(fmt.Sprintf("  Tax: $%.2f\n", tax))
-	out.WriteString(fmt.Sprintf("  Gross Profit: $%.2f\n", grossProfit))
-	out.WriteString(fmt.Sprintf("  Food Cost %%: %s\n", foodCostPct))
-	out.WriteString(fmt.Sprintf("  Receipts in HQ: %d\n", s.PurchaseEventCount))
+	out.WriteString(fmt.Sprintf("  COGS Pre-tax:    $%.2f\n", s.COGSExclTax))
+	out.WriteString(fmt.Sprintf("  Tax:             $%.2f\n", tax))
+	out.WriteString(fmt.Sprintf("  COGS Incl. Tax:  $%.2f\n", s.COGSInclTax))
+	out.WriteString(fmt.Sprintf("  Receipts in HQ:  %d\n", s.PurchaseEventCount))
 
 	if len(s.ByVendor) > 0 {
 		out.WriteString("\n")
