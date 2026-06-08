@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"flag"
@@ -236,39 +237,54 @@ func fetchToastCSVReports(date string) []*models.OrderDetail {
 		// Download remote file.
 		remoteFileName := fmt.Sprintf("/%s/%s/%s", exportId, date, localFileName)
 		localFilePath := fmt.Sprintf("output/toast_reports/%s", date)
+		cachedFilePath := fmt.Sprintf("%s/%s", localFilePath, localFileName)
 
+		// Toast's SFTP only retains the last ~7 days. For older periods
+		// (--weeks-ago >= 1) the download fails — fall back to the local
+		// cache from a prior run so historical reports stay accurate.
+		var bytes []byte
 		file, err := client.Download(remoteFileName)
 		if err != nil {
-			continue
-			log.Fatal(fmt.Errorf("failed to download %v: %w", remoteFileName, err))
-		}
+			cached, readErr := os.ReadFile(cachedFilePath)
+			if readErr != nil {
+				log.Debugf("skip %s: SFTP unavailable (%v) and no local cache at %s", remoteFileName, err, cachedFilePath)
+				continue
+			}
+			log.Infof("using cached %s (SFTP returned: %v)", cachedFilePath, err)
+			// Historical caches written before the O_TRUNC fix have
+			// duplicated headers and data rows from O_APPEND. Each Toast
+			// Order/Payment row has a unique ID, so byte-identical lines
+			// can only come from append-mode duplication — safe to dedup.
+			bytes = dedupCSVLines(cached)
+		} else {
+			bytes, err = ioutil.ReadAll(file)
+			if err != nil {
+				file.Close()
+				log.Fatalf("failed to read bytes from %s: %v", remoteFileName, err)
+			}
 
-		bytes, err := ioutil.ReadAll(file)
-		if err != nil {
+			if err = os.MkdirAll(localFilePath, os.ModePerm); err != nil {
+				file.Close()
+				log.Fatal(err)
+			}
+
+			// O_TRUNC (not O_APPEND): each successful re-download replaces
+			// the cached copy. Appending was a latent bug — re-running for
+			// the same date doubled the file and corrupted the cache for
+			// any future SFTP-failure fallback.
+			f, err := os.OpenFile(cachedFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+			if err != nil {
+				file.Close()
+				log.Fatal(err)
+			}
+			f.Write(bytes)
+			f.Close()
 			file.Close()
-			log.Fatalf("failed to read bytes: %v", bytes)
 		}
-
-		// todo: save to database
-		err = os.MkdirAll(localFilePath, os.ModePerm)
-		if err != nil {
-			file.Close()
-			log.Fatal(err)
-		}
-
-		f, err := os.OpenFile(fmt.Sprintf("%s/%s", localFilePath, localFileName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			file.Close()
-			log.Fatal(err)
-		}
-
-		f.Write(bytes)
 
 		// process order details
 		if localFileName == "OrderDetails.csv" {
 			if err = gocsv.UnmarshalBytes(bytes, &orderDetails); err != nil {
-				f.Close()
-				file.Close()
 				log.Fatal(err)
 			}
 		}
@@ -276,8 +292,6 @@ func fetchToastCSVReports(date string) []*models.OrderDetail {
 		// process payment details
 		if localFileName == "PaymentDetails.csv" {
 			if err = gocsv.UnmarshalBytes(bytes, &paymentDetails); err != nil {
-				f.Close()
-				file.Close()
 				log.Fatal(err)
 			}
 
@@ -291,12 +305,34 @@ func fetchToastCSVReports(date string) []*models.OrderDetail {
 				}
 			}
 		}
-
-		f.Close()
-		file.Close()
 	}
 
 	return orderDetails
+}
+
+// dedupCSVLines removes byte-identical duplicate lines while preserving
+// first-occurrence order. Used to repair Toast CSV caches corrupted by
+// the legacy O_APPEND write path (each prior run concatenated another
+// full copy of the file). Idempotent — uncorrupted files pass through
+// with the same content.
+func dedupCSVLines(data []byte) []byte {
+	lines := strings.Split(string(data), "\n")
+	seen := make(map[string]struct{}, len(lines))
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		// Blank trailing lines are common — keep one, drop the rest.
+		if line == "" {
+			if _, ok := seen[""]; ok {
+				continue
+			}
+		}
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		out = append(out, line)
+	}
+	return []byte(strings.Join(out, "\n"))
 }
 
 func groupOrderDetailsByServer(orderDetails []*models.OrderDetail) map[models.Server][]*models.OrderDetail {
@@ -671,6 +707,32 @@ func getCashHeld() []float64 {
 	return make([]float64, 0)
 }
 
+// promptWeeksAgo reads a non-negative integer from stdin selecting how many
+// weeks before the current pay period to process. Empty input (just Enter)
+// defaults to 0 (current week). Invalid input re-prompts. EOF is treated
+// as the default so piped/non-interactive runs without --weeks-ago don't
+// hang.
+func promptWeeksAgo() int {
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("Process which pay period? [0=current, 1=last week, 2=two weeks ago, ...] (default 0): ")
+		line, err := reader.ReadString('\n')
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			if err != nil {
+				log.Info("No input on stdin — defaulting to current week (--weeks-ago=0)")
+			}
+			return 0
+		}
+		n, parseErr := strconv.Atoi(trimmed)
+		if parseErr != nil || n < 0 {
+			fmt.Println("Invalid input — enter a non-negative integer (or press Enter for 0).")
+			continue
+		}
+		return n
+	}
+}
+
 func pickMercuryAccount(accounts []external.MercuryAccount, label string) external.MercuryAccount {
 	fmt.Printf("\nSelect %s account:\n", label)
 	for i, acct := range accounts {
@@ -950,7 +1012,20 @@ func main() {
 	forceResend := flag.String("force-resend", "", "comma-separated transfer kinds to force re-send (sales_tax, deferred_taxes, rent_hold, all)")
 	skipMercury := flag.Bool("skip-mercury", false, "skip Mercury account resolution and transfer dispatch (preview mode — no bank movement)")
 	skipClassify := flag.Bool("skip-classify", false, "skip the Mercury transaction classify pipeline (Pull → Claude → Apply)")
+	weeksAgo := flag.Int("weeks-ago", 0, "process the pay period N weeks before the current one (0 = current week, 1 = last week, ...)")
 	flag.Parse()
+
+	weeksAgoSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "weeks-ago" {
+			weeksAgoSet = true
+		}
+	})
+	if !weeksAgoSet {
+		*weeksAgo = promptWeeksAgo()
+	} else if *weeksAgo < 0 {
+		log.Fatalf("--weeks-ago must be >= 0, got %d", *weeksAgo)
+	}
 
 	forcedKinds, err := transferledger.ParseKinds(*forceResend)
 	if err != nil {
@@ -1133,7 +1208,10 @@ func main() {
 	cashEmployeeWages := getCashEmployeeWages(cashEmployees, defaultEmployeeTaxRate)
 
 	//--- Report Headers (Current Timesheet) ---
-	now := time.Now()
+	now := time.Now().AddDate(0, 0, -7*(*weeksAgo))
+	if *weeksAgo > 0 {
+		log.Infof("Processing pay period %d week(s) before today (anchor date: %s)", *weeksAgo, now.Format("2006-01-02"))
+	}
 	sunday := service.GetDateLastSunday(now)
 	dates := service.GetDatesStartingFromPreviousMonday(sunday)
 	fromDate := dates[0].Format("2006-01-02")
