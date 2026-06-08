@@ -124,6 +124,9 @@ func (s *WeeklySummary) Show() string {
 		if s.COGSExclTax > 0 {
 			output.WriteString(fmt.Sprintf("  Food Cost %%:              %.1f%%\n", (s.COGSExclTax/s.Sales)*100.0))
 		}
+		if s.CCFees > 0 {
+			output.WriteString(fmt.Sprintf("  Credit Card Cost %%:       %.1f%%\n", (s.CCFees/s.Sales)*100.0))
+		}
 	}
 	if s.COGSExclTax > 0 {
 		operatingProfit := s.Sales - s.COGSExclTax - totalLabor - s.CCFees
