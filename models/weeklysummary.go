@@ -3,6 +3,7 @@ package models
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 type TipDetails struct {
@@ -11,15 +12,24 @@ type TipDetails struct {
 }
 
 type WeeklySummary struct {
-	Sales            float64
-	SalesTax         float64
-	CashTendered     float64
-	CCFees           float64
-	VoidedTotal      float64
-	VoidedOrders     []*OrderDetail
-	Tips             TipDetails
-	Hours            []EmployeeHours
-	PreviousHours    []EmployeeHours
+	Sales        float64
+	SalesTax     float64
+	CashTendered float64
+	CCFees       float64
+	VoidedTotal  float64
+	VoidedOrders []*OrderDetail
+	Tips         TipDetails
+	// Hours is the set of hours actually worked this week (the accrual
+	// view). Drives Total Labor / Operating Profit and the Held Hours
+	// liability section. Previous-week hours don't live on the summary
+	// anymore — main.go consumes them once to build PayrollThisCycle and
+	// they're not rendered.
+	Hours []EmployeeHours
+	// PayrollThisCycle is what we are actually paying in this pay cycle —
+	// for primary-scheduled employees, their current-week hours; for
+	// new-employee (held) staff, their previous-week hours. Drives the
+	// Payroll This Cycle section (cash-out view).
+	PayrollThisCycle []EmployeeHours
 	CashEmployeesPay []CashEmployeePay
 	// CommissionEmployeesCost is the aggregate base + commission cost for
 	// all non-owner commission-based employees, excluding tips (tips come
@@ -57,18 +67,41 @@ func (s *WeeklySummary) TotalHourlyWorkersExpense() float64 {
 	return totalComp + totalPayrollTaxes
 }
 
-func formatHourlyWageLines(name string, hours, rate, wage, tips, employerTaxes float64) string {
+func formatHourlyWageLines(name, tenure, schedule string, hours, rate, wage, tips, employerTaxes float64) string {
 	takeHome := wage + tips
 	totalCost := takeHome + employerTaxes
+	var bits []string
+	if schedule != "" {
+		bits = append(bits, schedule)
+	}
+	if tenure != "" {
+		if tenure == "today" {
+			bits = append(bits, "joined today")
+		} else {
+			bits = append(bits, fmt.Sprintf("joined %s ago", tenure))
+		}
+	}
+	header := name
+	if len(bits) > 0 {
+		header = fmt.Sprintf("%s (%s)", name, strings.Join(bits, " · "))
+	}
 	return fmt.Sprintf(
 		"%s\n  Take-home pay: %.2f hours @ $%.2f/hr + $%.2f tips = $%.2f\n  Employer taxes: $%.2f\n  Total cost to business: $%.2f\n",
-		name, hours, rate, tips, takeHome, employerTaxes, totalCost,
+		header, hours, rate, tips, takeHome, employerTaxes, totalCost,
 	)
 }
 
-// computeHourlyTotals returns the current week's hourly wages and payroll
-// taxes (including cash employees rolled in as in the rest of the report).
-func (s *WeeklySummary) computeHourlyTotals() (wages, payrollTaxes float64) {
+// computeAccruedHourlyTotals returns the accrued labor cost for THIS week —
+// every hour worked this week × rate × employer tax rate, regardless of
+// when those wages will actually be paid. This is the P&L view: the
+// week's economics. Cash employees are rolled in (they're labor expense
+// the same way).
+//
+// Note: this differs from PayrollThisCycle (the cash-out view, which
+// includes held employees' PREVIOUS week's hours and excludes their
+// current-week hours). The delta between the two is the change in the
+// held-wage liability shown in ShowHeldHoursLiability.
+func (s *WeeklySummary) computeAccruedHourlyTotals() (wages, payrollTaxes float64) {
 	for _, employeeHours := range s.Hours {
 		wage := employeeHours.Hours * employeeHours.Employee.Rate
 		wages += wage
@@ -77,15 +110,6 @@ func (s *WeeklySummary) computeHourlyTotals() (wages, payrollTaxes float64) {
 	for _, cashEmployee := range s.CashEmployeesPay {
 		wages += cashEmployee.NetPay + cashEmployee.Taxes
 		payrollTaxes += cashEmployee.Taxes
-	}
-	return
-}
-
-func (s *WeeklySummary) computePreviousHourlyTotals() (wages, payrollTaxes float64) {
-	for _, employeeHours := range s.PreviousHours {
-		wage := employeeHours.Hours * employeeHours.Employee.Rate
-		wages += wage
-		payrollTaxes += wage * 0.106
 	}
 	return
 }
@@ -100,7 +124,7 @@ func (s *WeeklySummary) computePreviousHourlyTotals() (wages, payrollTaxes float
 func (s *WeeklySummary) Show() string {
 	output := strings.Builder{}
 
-	wages, payrollTaxes := s.computeHourlyTotals()
+	wages, payrollTaxes := s.computeAccruedHourlyTotals()
 	hourlyCost := wages + payrollTaxes
 	totalLabor := hourlyCost + s.CommissionEmployeesCost
 
@@ -142,11 +166,11 @@ func (s *WeeklySummary) Show() string {
 	return output.String()
 }
 
-// ShowLaborDetail renders the Labor Detail drill-down: hourly wage breakdown,
-// payroll taxes, and hourly-vs-commission totals.
+// ShowLaborDetail renders the Labor Detail drill-down: accrued hourly
+// wages for this week (the P&L view), payroll taxes, commission cost,
+// and the rollup that drives Total Labor / Operating Profit in Summary.
 func (s *WeeklySummary) ShowLaborDetail() string {
-	wages, payrollTaxes := s.computeHourlyTotals()
-	previousWages, _ := s.computePreviousHourlyTotals()
+	wages, payrollTaxes := s.computeAccruedHourlyTotals()
 	hourlyCost := wages + payrollTaxes
 	totalLabor := hourlyCost + s.CommissionEmployeesCost
 
@@ -154,8 +178,7 @@ func (s *WeeklySummary) ShowLaborDetail() string {
 	out.WriteString("Labor Detail\n")
 	out.WriteString("-----------------------\n")
 	out.WriteString("\n")
-	out.WriteString(fmt.Sprintf("  This Week's Wages:               $%.2f\n", wages))
-	out.WriteString(fmt.Sprintf("  Previous Week's Wages:           $%.2f\n", previousWages))
+	out.WriteString(fmt.Sprintf("  Wages Worked This Week:          $%.2f\n", wages))
 	out.WriteString(fmt.Sprintf("  Payroll Taxes:                   $%.2f\n", payrollTaxes))
 	out.WriteString(fmt.Sprintf("  Total Hourly Employee Cost:      $%.2f\n", hourlyCost))
 	out.WriteString(fmt.Sprintf("  Total Commission Employee Cost:  $%.2f\n", s.CommissionEmployeesCost))
@@ -164,42 +187,79 @@ func (s *WeeklySummary) ShowLaborDetail() string {
 	return out.String()
 }
 
-// ShowCurrentHoursDetail renders the per-employee hours/wage detail for
-// the current week, including cash employees rolled in as total-cost rows.
-func (s *WeeklySummary) ShowCurrentHoursDetail() string {
+// ShowHeldHoursLiability renders the per-employee hours worked THIS week
+// by held (new-employee) staff — i.e., wages accrued this week that will
+// be paid out next cycle. Primary-scheduled employees are absent (paid
+// same cycle, no liability accrues). Cash employees are absent (paid in
+// cash same cycle). asOf is the pay-period end date, used for tenure.
+// The per-employee schedule label is omitted because every row in this
+// section is by definition held.
+func (s *WeeklySummary) ShowHeldHoursLiability(asOf time.Time) string {
 	out := strings.Builder{}
-	out.WriteString("Hours - This Week\n")
+	out.WriteString("Held Hours (Liability - paid next cycle)\n")
 	out.WriteString("-----------------------\n")
 	out.WriteString("\n")
+	totalWages := 0.0
+	totalTaxes := 0.0
+	any := false
 	for _, employeeHours := range s.Hours {
+		if employeeHours.Employee.IsPrimarySchedule() {
+			continue
+		}
+		any = true
 		wage := employeeHours.Hours * employeeHours.Employee.Rate
 		tips := s.Tips.Details[employeeHours.Employee.Employee()]
 		payrollTaxes := wage * 0.106
-		out.WriteString(formatHourlyWageLines(employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes))
+		tenure := employeeHours.Employee.Tenure(asOf)
+		out.WriteString(formatHourlyWageLines(employeeHours.Employee.Name(), tenure, "", employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes))
 		out.WriteString("\n")
+		totalWages += wage
+		totalTaxes += payrollTaxes
 	}
-	for _, cashEmployee := range s.CashEmployeesPay {
-		totalComp := cashEmployee.NetPay + cashEmployee.Taxes
-		out.WriteString(fmt.Sprintf("%v: $%.2f pay + $%.2f taxes = $%.2f total cost\n", cashEmployee.Name, cashEmployee.NetPay, cashEmployee.Taxes, totalComp))
-		out.WriteString("\n")
+	if !any {
+		out.WriteString("No held hours accrued this week.\n\n")
+		return out.String()
 	}
+	out.WriteString(fmt.Sprintf("Total wages owed (paid next cycle):  $%.2f\n", totalWages))
+	out.WriteString(fmt.Sprintf("Total payroll taxes (next cycle):    $%.2f\n", totalTaxes))
+	out.WriteString(fmt.Sprintf("Total held liability this week:      $%.2f\n", totalWages+totalTaxes))
+	out.WriteString("\n")
 	return out.String()
 }
 
-// ShowPreviousHoursDetail renders per-employee hours/wage detail for the
-// previous week.
-func (s *WeeklySummary) ShowPreviousHoursDetail() string {
+// ShowPayrollThisCycle renders the per-employee payroll-this-cycle section
+// — what's actually being paid out this cycle. Primary-scheduled employees
+// show their current-week hours; held employees show their previous-week
+// hours and are labelled with the week-ending date the hours came from.
+// Held employees with no previous-week hours (e.g., first week) are
+// omitted from this section. heldFromWeekEnd is the previous pay-period
+// end date.
+func (s *WeeklySummary) ShowPayrollThisCycle(asOf, heldFromWeekEnd time.Time) string {
 	out := strings.Builder{}
-	out.WriteString("Hours - Previous Week\n")
+	out.WriteString("Payroll This Cycle (what we pay)\n")
 	out.WriteString("-----------------------\n")
 	out.WriteString("\n")
-	for _, employeeHours := range s.PreviousHours {
+	heldLabel := fmt.Sprintf("held from week ending %s", heldFromWeekEnd.Format("Jan 2"))
+	totalWages := 0.0
+	totalTaxes := 0.0
+	for _, employeeHours := range s.PayrollThisCycle {
 		wage := employeeHours.Hours * employeeHours.Employee.Rate
 		tips := s.Tips.Details[employeeHours.Employee.Employee()]
 		payrollTaxes := wage * 0.106
-		out.WriteString(formatHourlyWageLines(employeeHours.Employee.Name(), employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes))
+		tenure := employeeHours.Employee.Tenure(asOf)
+		schedule := TagPrimarySchedule
+		if !employeeHours.Employee.IsPrimarySchedule() {
+			schedule = heldLabel
+		}
+		out.WriteString(formatHourlyWageLines(employeeHours.Employee.Name(), tenure, schedule, employeeHours.Hours, employeeHours.Employee.Rate, wage, tips, payrollTaxes))
 		out.WriteString("\n")
+		totalWages += wage
+		totalTaxes += payrollTaxes
 	}
+	out.WriteString(fmt.Sprintf("Total wages paid this cycle:   $%.2f\n", totalWages))
+	out.WriteString(fmt.Sprintf("Total payroll taxes:           $%.2f\n", totalTaxes))
+	out.WriteString(fmt.Sprintf("Total payroll cost this cycle: $%.2f\n", totalWages+totalTaxes))
+	out.WriteString("\n")
 	return out.String()
 }
 

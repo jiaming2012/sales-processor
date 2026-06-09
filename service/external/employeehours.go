@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -80,12 +81,32 @@ func (stubs SlingTimesheetItemShifts) GetTotalHours() (float64, error) {
 	return total, nil
 }
 
-type SlingPayroll map[models.SlingUser][]SlingTimesheetItemShift
+// SlingPayrollEntry bundles a Sling user with the shifts attributed to them
+// in a given pay period; used as the value type in SlingPayroll because
+// SlingUser is no longer comparable (it carries a Tags slice).
+type SlingPayrollEntry struct {
+	User   models.SlingUser
+	Shifts []SlingTimesheetItemShift
+}
+
+type SlingPayroll map[int]SlingPayrollEntry
 
 type slingTimesheetClient struct {
 	baseURL string
 	authKey string
 	users   map[int]models.SlingUser
+	// groups maps free-form Sling group IDs (type="group") to their names;
+	// position/location/everyone groups are not stored here.
+	groups map[int]string
+}
+
+// Users returns the populated set of active Sling users, in unspecified order.
+func (c *slingTimesheetClient) Users() []models.SlingUser {
+	out := make([]models.SlingUser, 0, len(c.users))
+	for _, u := range c.users {
+		out = append(out, u)
+	}
+	return out
 }
 
 func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (SlingPayroll, error) {
@@ -112,7 +133,6 @@ func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (Sling
 	}
 
 	slingPayroll := make(SlingPayroll)
-	userIDCache := make(map[int]struct{})
 	for _, dto := range itemsDTO {
 		if len(dto.Projections) == 0 {
 			log.Debugf("skipping %v because it does not have any projections", dto.User)
@@ -137,31 +157,70 @@ func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (Sling
 			}
 
 			if !itemShift.IsApproved {
-				if user.CommissionSalesStructure != nil {
+				if user.HasTag(models.TagCommission) {
 					log.Debugf("surpressing error: commission based employee, %v, is allowed to have unapproved shift %v -> %v", user, itemShift.ClockIn, itemShift.ClockOut)
 				} else {
 					return nil, fmt.Errorf("unapproved shift found for %v from %v -> %v", user.Name(), itemShift.ClockIn, itemShift.ClockOut)
 				}
 			}
 
-			if _, found := userIDCache[dto.User.ID]; !found {
-				// make singleton list
-				slingPayroll[user] = []SlingTimesheetItemShift{
-					*itemShift,
-				}
-
-				// update the cache
-				userIDCache[dto.User.ID] = struct{}{}
-			} else {
-				slingPayroll[user] = append(slingPayroll[user], *itemShift)
+			entry, found := slingPayroll[dto.User.ID]
+			if !found {
+				entry = SlingPayrollEntry{User: user}
 			}
+			entry.Shifts = append(entry.Shifts, *itemShift)
+			slingPayroll[dto.User.ID] = entry
 		}
 	}
 
 	return slingPayroll, nil
 }
 
-func (c *slingTimesheetClient) PopulateUsers(commissionBasedEmployees []models.CommissionBasedEmployee) error {
+// fetchGroups populates c.groups with the names of free-form Sling groups
+// (type="group"); position/location/everyone groups are intentionally
+// dropped since they aren't used as user tags by this project.
+func (c *slingTimesheetClient) fetchGroups() error {
+	groupsURL := fmt.Sprintf("%s/groups", c.baseURL)
+
+	req, err := http.NewRequest("GET", groupsURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", c.authKey)
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to fetch groups: %v", resp.Status)
+	}
+
+	var groups []struct {
+		ID   int    `json:"id"`
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if err = json.NewDecoder(resp.Body).Decode(&groups); err != nil {
+		return fmt.Errorf("json decode failure for sling groups: %w", err)
+	}
+
+	c.groups = make(map[int]string, len(groups))
+	for _, g := range groups {
+		if g.Type == "group" {
+			c.groups[g.ID] = g.Name
+		}
+	}
+	return nil
+}
+
+func (c *slingTimesheetClient) PopulateUsers() error {
+	if err := c.fetchGroups(); err != nil {
+		return fmt.Errorf("failed to fetch sling groups: %w", err)
+	}
+
 	usersURL := fmt.Sprintf("%s/users/concise", c.baseURL)
 
 	c.users = make(map[int]models.SlingUser)
@@ -190,7 +249,14 @@ func (c *slingTimesheetClient) PopulateUsers(commissionBasedEmployees []models.C
 	}
 
 	for _, dto := range slingDTO.Users {
-		user, found, dtoErr := dto.ToSlingUser(commissionBasedEmployees)
+		var tags []string
+		for _, gid := range dto.GroupIDs {
+			if name, ok := c.groups[gid]; ok {
+				tags = append(tags, name)
+			}
+		}
+
+		user, found, dtoErr := dto.ToSlingUser(tags)
 		if dtoErr != nil {
 			fmt.Printf("ERROR: %v: skip user? (y/n)\n", dtoErr)
 			var skip string
@@ -206,6 +272,18 @@ func (c *slingTimesheetClient) PopulateUsers(commissionBasedEmployees []models.C
 		if found {
 			c.users[user.ID] = *user
 		}
+	}
+
+	var missingHireDate []string
+	for _, u := range c.users {
+		if u.HireDate.IsZero() {
+			missingHireDate = append(missingHireDate, u.Name())
+		}
+	}
+	if len(missingHireDate) > 0 {
+		sort.Strings(missingHireDate)
+		return fmt.Errorf("missing hireDate in Sling for %d employee(s); backfill in Sling and retry:\n  - %s",
+			len(missingHireDate), strings.Join(missingHireDate, "\n  - "))
 	}
 
 	return nil
@@ -250,8 +328,9 @@ func NewSlingTimesheet(baseURL string, email string, password string) (*slingTim
 func (p SlingPayroll) FetchTimesheet(tipExclusions []models.TipExclusion) (models.Timesheet, error) {
 	timesheet := make(models.Timesheet)
 
-	for user, shifts := range p {
-		for _, shift := range shifts {
+	for _, entry := range p {
+		user := entry.User
+		for _, shift := range entry.Shifts {
 			weekday := shift.ClockIn.Weekday()
 			employee := models.Employee(user.Name())
 

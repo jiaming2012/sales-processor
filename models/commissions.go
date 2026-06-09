@@ -73,6 +73,11 @@ type CommissionBasedEmployee struct {
 	Id                       int
 	Name                     string
 	CommissionSalesStructure *CommissionSalesStructure
+	// IsOwner marks the company owner; owners are tracked through the
+	// commission flow only to suppress them from the hourly section, but
+	// are excluded from labor-cost aggregation and the per-employee
+	// commission breakdown (they pay themselves outside payroll).
+	IsOwner bool
 }
 
 type commissionBasedEmployeesTopLineSummary struct {
