@@ -1284,32 +1284,26 @@ func main() {
 		}
 	}
 
-	//--- Mercury Transaction Classification (Claude via CLI) ---
-	// Pull every card tx in the pay period, hand the snapshot to Claude via
-	// the `claude` CLI (one-shot session), then PATCH Mercury with the
-	// proposed categories. Skipped when --skip-mercury (no Mercury client)
-	// or --skip-classify (operator opt-out). Fails hard at every step:
-	// missing CLI, Mercury error, malformed proposals, PATCH error.
-	if !*skipMercury && !*skipClassify {
-		classifyMercuryTransactions(mercuryClient, dates[0], dates[len(dates)-1])
-	}
-
 	//--- COGS (from HQ inventory) ---
 	// HQ_INVENTORY_SERVICE_TOKEN gates the integration. When unset, the
 	// run continues without a COGS section so dev environments without
 	// HQ access aren't blocked. When set, an incomplete period (pending
 	// receipts or unlinked line items) is treated as a hard failure —
 	// food cost numbers would be misleading.
+	// Runs before the AI classify pipeline so pending-receipt failures
+	// surface fast — operators shouldn't wait through a ~90s Claude run
+	// only to be told to go review receipts in HQ.
 	hqSummary := fetchHQPeriodSummary(mercuryClient, dates[0], dates[len(dates)-1])
 
-	//--- Report Headers (Previous Timesheet) ---
+	//--- Fetch Timesheets (current + previous) ---
+	// Runs before the ~90s Claude classify so unapproved shifts and other
+	// Sling failures surface immediately instead of after the AI call.
 	lastWeek := now.AddDate(0, 0, -7)
 	previousSunday := service.GetDateLastSunday(lastWeek)
 	previousDates := service.GetDatesStartingFromPreviousMonday(previousSunday)
 	previousFromDate := previousDates[0].Format("2006-01-02")
 	previousToDate := previousDates[len(previousDates)-1].Format("2006-01-02")
 
-	//--- Fetch Timesheets
 	currentTimesheet, err := slingClient.GetPayroll(fromDate, toDate)
 	if err != nil {
 		panic(err)
@@ -1318,6 +1312,16 @@ func main() {
 	previousTimesheet, err := slingClient.GetPayroll(previousFromDate, previousToDate)
 	if err != nil {
 		panic(err)
+	}
+
+	//--- Mercury Transaction Classification (Claude via CLI) ---
+	// Pull every card tx in the pay period, hand the snapshot to Claude via
+	// the `claude` CLI (one-shot session), then PATCH Mercury with the
+	// proposed categories. Skipped when --skip-mercury (no Mercury client)
+	// or --skip-classify (operator opt-out). Fails hard at every step:
+	// missing CLI, Mercury error, malformed proposals, PATCH error.
+	if !*skipMercury && !*skipClassify {
+		classifyMercuryTransactions(mercuryClient, dates[0], dates[len(dates)-1])
 	}
 
 	//--- Process Timesheets ---

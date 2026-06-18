@@ -82,31 +82,42 @@ func (dto *SlingUserDTO) ToSlingUser(tags []string) (*SlingUser, bool, error) {
 		return nil, false, fmt.Errorf("failed to parse employeeID: %w", err)
 	}
 
-	if len(dto.Wages.Base) == 0 {
-		return nil, false, fmt.Errorf("wage not set in sling for %s %s. Found 0 wages", dto.FirstName, dto.LastName)
+	// Commission/owner users are paid via commission or pay themselves
+	// outside payroll, so they may legitimately have no base wage in Sling.
+	isCommissionOrOwner := false
+	for _, t := range tags {
+		if t == TagCommission || t == TagOwner {
+			isCommissionOrOwner = true
+			break
+		}
 	}
 
 	var wage float64
-	previousWageDateEffective := time.Time{}
-	for _, baseWage := range dto.Wages.Base {
-		// convert baseWage to time.Time
-		dateEffective, err := time.Parse("2006-01-02", baseWage.DateEffective)
-		if err != nil {
-			return nil, false, fmt.Errorf("failed to parse dateEffective: %w", err)
+	if !isCommissionOrOwner {
+		if len(dto.Wages.Base) == 0 {
+			return nil, false, fmt.Errorf("wage not set in sling for %s %s. Found 0 wages", dto.FirstName, dto.LastName)
 		}
 
-		if dateEffective.After(previousWageDateEffective) {
-			wage, err = strconv.ParseFloat(baseWage.RegularRate, 64)
+		previousWageDateEffective := time.Time{}
+		for _, baseWage := range dto.Wages.Base {
+			dateEffective, err := time.Parse("2006-01-02", baseWage.DateEffective)
 			if err != nil {
-				return nil, false, fmt.Errorf("failed to parse wage: %w", err)
+				return nil, false, fmt.Errorf("failed to parse dateEffective: %w", err)
 			}
 
-			previousWageDateEffective = dateEffective
-		}
-	}
+			if dateEffective.After(previousWageDateEffective) {
+				wage, err = strconv.ParseFloat(baseWage.RegularRate, 64)
+				if err != nil {
+					return nil, false, fmt.Errorf("failed to parse wage: %w", err)
+				}
 
-	if wage == 0 {
-		return nil, false, fmt.Errorf("expected to find a wage for %s %s. Found %v", dto.FirstName, dto.LastName, wage)
+				previousWageDateEffective = dateEffective
+			}
+		}
+
+		if wage == 0 {
+			return nil, false, fmt.Errorf("expected to find a wage for %s %s. Found %v", dto.FirstName, dto.LastName, wage)
+		}
 	}
 
 	var hireDate time.Time
