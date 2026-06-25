@@ -310,6 +310,77 @@ func fetchToastCSVReports(date string) []*models.OrderDetail {
 	return orderDetails
 }
 
+// newToastSFTPClient builds an SFTP client against the Toast export
+// bucket using the same creds/id_rsa identity fetchToastCSVReports uses.
+// Returns nil if the private key is missing — callers should treat that
+// as "SFTP not available, run locally only" rather than fatal so the
+// report still ships in offline / dev environments.
+func newToastSFTPClient() (*sftp.Client, error) {
+	pk, err := ioutil.ReadFile("creds/id_rsa")
+	if err != nil {
+		return nil, fmt.Errorf("read SFTP private key: %w", err)
+	}
+	config := sftp.Config{
+		Username:   "YumYumsExportUser",
+		PrivateKey: string(pk),
+		Server:     "s-9b0f88558b264dfda.server.transfer.us-east-1.amazonaws.com:22",
+		Timeout:    time.Second * 30,
+	}
+	return sftp.New(config)
+}
+
+// loadOperatingProfitHistory bundles the load/backfill flow used before
+// rendering the weekly summary. Returns the history and a status string
+// suitable for direct display in the report (empty when everything went
+// smoothly). Never fails — degraded paths surface in the status text so
+// the report still ships when SFTP is unreachable or PDFs are missing.
+func loadOperatingProfitHistory() (*models.OperatingProfitHistory, string) {
+	store := service.OperatingProfitHistoryStore{
+		RemotePath: fmt.Sprintf("/%s/%s", exportId, service.OperatingProfitHistoryFileName),
+		LocalPath:  filepath.Join("output", "toast_reports", service.OperatingProfitHistoryFileName),
+	}
+
+	client, err := newToastSFTPClient()
+	if err != nil {
+		log.Warnf("operating-profit history: SFTP unavailable (%v) — using local cache only", err)
+	} else {
+		store.Client = client
+		defer client.Close()
+	}
+
+	history, status, err := store.Load()
+	if err != nil {
+		log.Warnf("operating-profit history: load failed (%v) — starting empty", err)
+		return &models.OperatingProfitHistory{}, fmt.Sprintf("history load failed: %v", err)
+	}
+
+	// Auto-backfill from the last 3 PDFs when we have nothing on hand —
+	// gets the rolling chart populated on first run instead of waiting 4
+	// weeks for it to fill in.
+	if len(history.Entries) == 0 {
+		added, backfillStatus := service.BackfillOperatingProfitFromPDFs(history, "output/payroll", 3)
+		if added > 0 {
+			log.Infof("operating-profit history: backfilled %d entries from prior PDFs", added)
+			if saveStatus, err := store.Save(history); err == nil && saveStatus != "" {
+				if status != "" {
+					status += "; "
+				}
+				status += saveStatus
+			} else if err != nil {
+				log.Warnf("operating-profit history: save after backfill failed: %v", err)
+			}
+		}
+		if backfillStatus != "" {
+			if status != "" {
+				status += "; "
+			}
+			status += backfillStatus
+		}
+	}
+
+	return history, status
+}
+
 // dedupCSVLines removes byte-identical duplicate lines while preserving
 // first-occurrence order. Used to repair Toast CSV caches corrupted by
 // the legacy O_APPEND write path (each prior run concatenated another
@@ -1470,6 +1541,29 @@ func main() {
 		weeklySummary.COGSInclTax = hqSummary.COGSInclTax
 	}
 
+	// Operating-profit history: load before Show() so the trailing 4-week
+	// rolling chart can render under Operating Profit. The new entry for
+	// this week is saved AFTER the PDF is written so we don't pollute
+	// history with an aborted run.
+	weekEnding := dates[len(dates)-1]
+	weekEndingStr := weekEnding.Format("2006-01-02")
+	opProfitHistory, opProfitHistoryStatus := loadOperatingProfitHistory()
+	weeklySummary.WeekEnding = weekEnding
+	// Filter out any prior entry for this same week (re-run case) so the
+	// chart's current row isn't duplicated against last-run's stored row.
+	priorEntries := make([]models.OperatingProfitEntry, 0, len(opProfitHistory.Entries))
+	for _, e := range opProfitHistory.Entries {
+		if e.WeekEnding == weekEndingStr {
+			continue
+		}
+		priorEntries = append(priorEntries, e)
+	}
+	if len(priorEntries) > 3 {
+		priorEntries = priorEntries[len(priorEntries)-3:]
+	}
+	weeklySummary.PriorOperatingProfits = priorEntries
+	weeklySummary.OperatingProfitHistoryStatus = opProfitHistoryStatus
+
 	// Report layout: Summary first (high-level dashboard with Operating
 	// Profit), then drill-down sections in the order the manager is
 	// likely to want them — COGS and Labor flow directly into the
@@ -1623,6 +1717,35 @@ func main() {
 	fmt.Println("\n--- Output Files ---")
 	fmt.Printf("  PDF: %s\n", pdfPath)
 	fmt.Printf("  CSV: %s\n", csvPath)
+
+	// Persist this week's operating-profit entry so the next run's
+	// rolling chart has another data point. Saved AFTER the PDF/CSV
+	// write so a panic above this point doesn't leave history desynced
+	// from what the operator actually saw.
+	if weeklySummary.COGSExclTax > 0 {
+		_, totalLabor := weeklySummary.LaborBreakdown()
+		entry := models.MakeOperatingProfitEntry(
+			weekEnding,
+			weeklySummary.Sales,
+			weeklySummary.COGSExclTax,
+			totalLabor,
+			weeklySummary.CCFees,
+		)
+		opProfitHistory.Upsert(entry)
+		store := service.OperatingProfitHistoryStore{
+			RemotePath: fmt.Sprintf("/%s/%s", exportId, service.OperatingProfitHistoryFileName),
+			LocalPath:  filepath.Join("output", "toast_reports", service.OperatingProfitHistoryFileName),
+		}
+		if client, err := newToastSFTPClient(); err == nil {
+			store.Client = client
+			defer client.Close()
+		}
+		if status, err := store.Save(opProfitHistory); err != nil {
+			log.Warnf("operating-profit history: save failed: %v", err)
+		} else if status != "" {
+			log.Warnf("operating-profit history: %s", status)
+		}
+	}
 
 	//--- Mercury Transfers ---
 	// Gated by --skip-mercury: when set, the setup block above left

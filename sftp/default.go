@@ -51,6 +51,20 @@ func (c *Client) Create(filePath string) (io.ReadWriteCloser, error) {
 	return c.sftpClient.Create(filePath)
 }
 
+// CreateWriteOnly creates a remote/destination file opened for write-only
+// access. Required for SFTP backends (notably AWS Transfer Family with S3)
+// that reject the O_RDWR mode the standard Create uses — those servers
+// return SSH_FX_OP_UNSUPPORTED on "Cannot open file in mode: CREATE|READ
+// |TRUNCATE|WRITE" because the underlying object store can't satisfy a
+// read of an in-flight write.
+func (c *Client) CreateWriteOnly(filePath string) (io.WriteCloser, error) {
+	if err := c.connect(); err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+
+	return c.sftpClient.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+}
+
 // Upload writes local/source file data streams to remote/destination file.
 func (c *Client) Upload(source io.Reader, destination io.Writer, size int) error {
 	if err := c.connect(); err != nil {

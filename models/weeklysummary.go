@@ -42,6 +42,20 @@ type WeeklySummary struct {
 	// COGSInclTax mirrors HQ's COGS-with-tax for the period; rendered in
 	// the COGS detail section. Populated externally alongside COGSExclTax.
 	COGSInclTax float64
+	// PriorOperatingProfits is the trailing window of past operating-profit
+	// entries (NOT including this week's), in ascending order by week end.
+	// Populated externally before Show(); used to render the rolling
+	// average chart below Operating Profit.
+	PriorOperatingProfits []OperatingProfitEntry
+	// WeekEnding is the period-end date for the current run, used as the
+	// label for the current row in the rolling chart. Optional; when zero
+	// the chart degrades to "this week" labelling.
+	WeekEnding time.Time
+	// OperatingProfitHistoryStatus is a short note (set externally) about
+	// the state of the history source, e.g. cloud-sync failure or a
+	// degraded fallback path. Rendered as a single line under the chart
+	// when non-empty so operators see why the data may be stale.
+	OperatingProfitHistoryStatus string
 }
 
 func (s *WeeklySummary) TotalHourlyWorkersExpense() float64 {
@@ -89,6 +103,17 @@ func formatHourlyWageLines(name, tenure, schedule string, hours, rate, wage, tip
 		"%s\n  Take-home pay: %.2f hours @ $%.2f/hr + $%.2f tips = $%.2f\n  Employer taxes: $%.2f\n  Total cost to business: $%.2f\n",
 		header, hours, rate, tips, takeHome, employerTaxes, totalCost,
 	)
+}
+
+// LaborBreakdown returns the hourly (wages + payroll taxes) cost and the
+// total labor cost (hourly + commission) for THIS week — the same numbers
+// the Summary and Labor Detail sections render. Exposed for callers that
+// need to record labor cost alongside operating-profit history.
+func (s *WeeklySummary) LaborBreakdown() (hourlyCost, totalLabor float64) {
+	wages, payrollTaxes := s.computeAccruedHourlyTotals()
+	hourlyCost = wages + payrollTaxes
+	totalLabor = hourlyCost + s.CommissionEmployeesCost
+	return
 }
 
 // computeAccruedHourlyTotals returns the accrued labor cost for THIS week —
@@ -161,9 +186,80 @@ func (s *WeeklySummary) Show() string {
 		}
 		output.WriteString("\n")
 		output.WriteString("  * Operating Profit = Net Sales - COGS - Total Labor - Credit Card Fees\n")
+		output.WriteString(s.renderRollingOperatingProfit(operatingProfit))
 	}
 	output.WriteString("\n")
 	return output.String()
+}
+
+// renderRollingOperatingProfit builds the trailing 4-week chart of
+// operating profit + the rolling average ending at each row. The chart is
+// rendered using the 2-column label:value pattern the PDF table renderer
+// already understands (column auto-fits per block), with the rolling
+// average folded into the value column so the PDF stays aligned even in
+// Helvetica's variable-width type.
+func (s *WeeklySummary) renderRollingOperatingProfit(currentOperatingProfit float64) string {
+	const windowSize = 4 // current week + 3 priors
+
+	currentLabel := "Current week"
+	if !s.WeekEnding.IsZero() {
+		currentLabel = "Week ending " + s.WeekEnding.Format("2006-01-02")
+	}
+
+	out := strings.Builder{}
+	out.WriteString("\n")
+	out.WriteString("  Operating Profit Trend (4-Week Rolling)\n")
+	out.WriteString("\n")
+
+	// Take up to (windowSize-1) priors so the chart never shows more than
+	// windowSize rows total (current week + priors).
+	priors := s.PriorOperatingProfits
+	if len(priors) > windowSize-1 {
+		priors = priors[len(priors)-(windowSize-1):]
+	}
+
+	if len(priors) == 0 {
+		out.WriteString("    No prior operating-profit history available — rolling average needs at least one prior week.\n")
+		if s.OperatingProfitHistoryStatus != "" {
+			out.WriteString("    Note: " + s.OperatingProfitHistoryStatus + "\n")
+		}
+		return out.String()
+	}
+
+	// Build the row series: priors (asc) then the current week.
+	type row struct {
+		label  string
+		profit float64
+	}
+	rows := make([]row, 0, len(priors)+1)
+	for _, p := range priors {
+		rows = append(rows, row{label: "Week of " + p.WeekEnding, profit: p.OperatingProfit})
+	}
+	rows = append(rows, row{label: currentLabel, profit: currentOperatingProfit})
+
+	// Trailing 4-week rolling average ending at each row.
+	for i, r := range rows {
+		windowStart := i - (windowSize - 1)
+		if windowStart < 0 {
+			windowStart = 0
+		}
+		count := 0
+		sum := 0.0
+		for j := windowStart; j <= i; j++ {
+			sum += rows[j].profit
+			count++
+		}
+		avg := sum / float64(count)
+		out.WriteString(fmt.Sprintf("    %s: $%.2f (rolling avg: $%.2f)\n", r.label, r.profit, avg))
+	}
+
+	if len(priors) < windowSize-1 {
+		out.WriteString(fmt.Sprintf("\n    Note: only %d prior week(s) of history available — rolling average will stabilise once 4 weeks are recorded.\n", len(priors)))
+	}
+	if s.OperatingProfitHistoryStatus != "" {
+		out.WriteString("    Note: " + s.OperatingProfitHistoryStatus + "\n")
+	}
+	return out.String()
 }
 
 // ShowLaborDetail renders the Labor Detail drill-down: accrued hourly
