@@ -28,6 +28,11 @@ tasks:
     cmds:
       - go run main.go --skip-classify {{.CLI_ARGS}}
 
+  payroll:skip-receipts:
+    desc: Full run but skip the HQ COGS fetch (use when HQ is unreachable or to ship without waiting on receipt review — PDF will have no COGS section)
+    cmds:
+      - go run main.go --skip-receipts {{.CLI_ARGS}}
+
   # ---------------------------------------------------------------------------
   # Classify pipeline — debug targets
   #

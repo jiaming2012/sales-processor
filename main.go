@@ -1017,6 +1017,7 @@ func main() {
 	forceResend := flag.String("force-resend", "", "comma-separated transfer kinds to force re-send (sales_tax, deferred_taxes, rent_hold, all)")
 	skipMercury := flag.Bool("skip-mercury", false, "skip Mercury account resolution and transfer dispatch (preview mode — no bank movement)")
 	skipClassify := flag.Bool("skip-classify", false, "skip the Mercury transaction classify pipeline (Pull → Claude → Apply)")
+	skipReceipts := flag.Bool("skip-receipts", false, "skip the HQ COGS fetch and Mercury↔HQ gap check (ship payroll without a COGS section — food cost numbers will be missing)")
 	weeksAgo := flag.Int("weeks-ago", 0, "process the pay period N weeks before the current one (0 = current week, 1 = last week, ...)")
 	skipScheduleWarning := flag.Bool("skip-schedule-warning", false, "silence the interactive warning when an hourly employee has ≥3 months tenure but no 'primary pay schedule' tag in Sling")
 	flag.Parse()
@@ -1293,7 +1294,15 @@ func main() {
 	// Runs before the AI classify pipeline so pending-receipt failures
 	// surface fast — operators shouldn't wait through a ~90s Claude run
 	// only to be told to go review receipts in HQ.
-	hqSummary := fetchHQPeriodSummary(mercuryClient, dates[0], dates[len(dates)-1])
+	// --skip-receipts bypasses the fetch entirely (PDF ships without a
+	// COGS section); use when HQ is down or to publish without waiting
+	// on receipt review.
+	var hqSummary *external.HQPeriodSummary
+	if *skipReceipts {
+		log.Warn("--skip-receipts set: skipping HQ COGS fetch and Mercury↔HQ gap check (PDF will have no COGS section)")
+	} else {
+		hqSummary = fetchHQPeriodSummary(mercuryClient, dates[0], dates[len(dates)-1])
+	}
 
 	//--- Fetch Timesheets (current + previous) ---
 	// Runs before the ~90s Claude classify so unapproved shifts and other
