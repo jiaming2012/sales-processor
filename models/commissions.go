@@ -44,7 +44,7 @@ type CommissionSalesIsGreaterThanOrEqual struct {
 }
 
 func (i CommissionSalesIsGreaterThanOrEqual) IsSatisfied(sales float64) bool {
-	log.Fatalf("Congrats on reaching the milestone of $%v weekly sales. Please implement a new compensation policy for this level.")
+	log.Fatalf("Congrats on reaching the milestone of $%v weekly sales. Please implement a new compensation policy for this level.", i.SalesThreshold)
 	return sales >= i.SalesThreshold
 }
 
