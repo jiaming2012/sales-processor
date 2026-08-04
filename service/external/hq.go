@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	hqDefaultBaseURL = "http://localhost:8080"
+	hqDefaultBaseURL = "http://localhost:8484"
 )
 
 // HQPeriodSummary mirrors the JSON returned by

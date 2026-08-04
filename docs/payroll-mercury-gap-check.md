@@ -342,7 +342,7 @@ go test ./... -run TestGapCheckMissingTx
 
 # 3. Local end-to-end:
 HQ_INVENTORY_SERVICE_TOKEN=<dev-token> \
-HQ_BASE_URL=http://localhost:8080 \
+HQ_BASE_URL=http://localhost:8484 \
 MERCURY_API_KEY=<dev-token> \
   go run . payroll
 ```

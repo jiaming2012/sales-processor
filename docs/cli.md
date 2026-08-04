@@ -56,7 +56,7 @@ that writes the resulting ID back to the env file.
 | Variable | Required | Purpose |
 |---|---|---|
 | `HQ_INVENTORY_SERVICE_TOKEN` | No\* | Bearer token for the HQ inventory service. Must match the value the HQ backend reads under the same name. When unset, the COGS section is omitted and the run continues |
-| `HQ_BASE_URL` | No | Defaults to `http://localhost:8080`. Override when pointing at a non-local HQ deployment |
+| `HQ_BASE_URL` | No | Defaults to `http://localhost:8484`. Override when pointing at a non-local HQ deployment |
 
 \* Not required to run the report. When unset, the PDF prints without
 a Cost of Goods Sold section. When set, the report **fails fast** if HQ
