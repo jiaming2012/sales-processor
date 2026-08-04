@@ -113,6 +113,17 @@ func (s commissionBasedEmployeesTopLineSummary) GetBasePay() float64 {
 	return math.Max(basePay, 0.0)
 }
 
+func (s commissionBasedEmployeesTopLineSummary) GetNetPay() float64 {
+	return s.GetBasePay() + s.GetCommission() + s.Tips - s.Taxes
+}
+
+// GetDeposit is the amount actually owed to the employee once the rent
+// hold is removed from net pay — the "Deposit" line on the report and
+// the amount wired out via the Mercury deposit leg.
+func (s commissionBasedEmployeesTopLineSummary) GetDeposit() float64 {
+	return s.GetNetPay() - s.RentHold
+}
+
 func (s commissionBasedEmployeesTopLineSummary) Show() string {
 	output := strings.Builder{}
 
@@ -127,16 +138,15 @@ func (s commissionBasedEmployeesTopLineSummary) Show() string {
 	output.WriteString(fmt.Sprintf("Tips: $%.2f\n", s.Tips))
 
 	preTaxPay := basePay + commission + s.Tips
-	netPay := preTaxPay - s.Taxes
 	output.WriteString(fmt.Sprintf("\nPretax Pay: $%.2f\n", preTaxPay))
 	output.WriteString(fmt.Sprintf("Taxes: -$%.2f\n", s.Taxes))
-	output.WriteString(fmt.Sprintf("\nNet Pay: $%.2f\n", netPay))
+	output.WriteString(fmt.Sprintf("\nNet Pay: $%.2f\n", s.GetNetPay()))
 
 	if s.RentHold > 0 {
 		output.WriteString(fmt.Sprintf("\nRent Hold: -$%.2f\n", s.RentHold))
 	}
 
-	output.WriteString(fmt.Sprintf("\nDeposit: $%.2f\n", netPay-s.RentHold))
+	output.WriteString(fmt.Sprintf("\nDeposit: $%.2f\n", s.GetDeposit()))
 
 	return output.String()
 }

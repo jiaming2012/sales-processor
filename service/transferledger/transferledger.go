@@ -22,6 +22,7 @@ const (
 	KindSalesTax      Kind = "sales_tax"
 	KindDeferredTaxes Kind = "deferred_taxes"
 	KindRentHold      Kind = "rent_hold"
+	KindDeposit       Kind = "deposit"
 )
 
 type Entry struct {
@@ -114,7 +115,7 @@ func IdempotencyKey(payPeriod string, kind Kind, retry bool) string {
 }
 
 func AllKinds() []Kind {
-	return []Kind{KindSalesTax, KindDeferredTaxes, KindRentHold}
+	return []Kind{KindSalesTax, KindDeferredTaxes, KindRentHold, KindDeposit}
 }
 
 // ParseKinds parses a comma-separated list (e.g. "sales_tax,rent_hold" or
@@ -130,7 +131,7 @@ func ParseKinds(s string) ([]Kind, error) {
 	for _, raw := range strings.Split(s, ",") {
 		k := Kind(strings.TrimSpace(raw))
 		if !validKind(k) {
-			return nil, fmt.Errorf("invalid transfer kind %q (valid: sales_tax, deferred_taxes, rent_hold, all)", k)
+			return nil, fmt.Errorf("invalid transfer kind %q (valid: sales_tax, deferred_taxes, rent_hold, deposit, all)", k)
 		}
 		out = append(out, k)
 	}

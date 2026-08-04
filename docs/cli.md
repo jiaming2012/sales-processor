@@ -12,7 +12,7 @@ go run main.go [flags]
 |---|---|---|---|
 | `--sandbox` | bool | `false` | Use Mercury's sandbox environment. Also routes env-file writes to `.env.sandbox` instead of `.env` |
 | `--auto-approve-transfers` | bool | `false` | Skip the y/n prompt before dispatching each transfer batch |
-| `--force-resend` | string | `""` | Comma-separated list of transfer kinds to clear from the ledger before this run. Accepts `sales_tax`, `deferred_taxes`, `rent_hold`, or `all` |
+| `--force-resend` | string | `""` | Comma-separated list of transfer kinds to clear from the ledger before this run. Accepts `sales_tax`, `deferred_taxes`, `rent_hold`, `deposit`, or `all` |
 | `--skip-mercury` | bool | `false` | Preview mode: bypass Mercury account/recipient resolution, transfer dispatch, AND the classify pipeline (classify needs the Mercury client). The PDF/CSV still render. Use when iterating on report formatting without reachable Mercury (offline dev, blocked IP, etc.) |
 | `--skip-classify` | bool | `false` | Run Mercury transfers but skip the Claude-based classify pipeline. Use when `claude` CLI is unavailable on the host (e.g., a prod cron without Claude Code installed). See [classification.md](classification.md) for full pipeline details. |
 
@@ -37,6 +37,10 @@ All env vars are loaded from `.env` (production) or `.env.sandbox`
 | `MERCURY_DEFERRED_TAX_ACCOUNT_ID` | No* | Deferred-taxes destination account |
 | `MERCURY_RENT_HOLD_RECIPIENT_ID` | No* | Rent-hold recipient (Mercury Personal account via the recipient flow) |
 | `MERCURY_RENT_HOLD_METHOD` | No | `ach` or `domesticWire`. When unset and the recipient supports both, the user is prompted and the choice is persisted here |
+| `MERCURY_PERSONAL_API_KEY` | Yes | Bearer token for the Mercury Personal workspace — the deposit leg (Latanya's pay) dispatches from there |
+| `MERCURY_PERSONAL_SOURCE_ACCOUNT_ID` | No* | Personal-workspace source account for the deposit leg |
+| `MERCURY_DEPOSIT_RECIPIENT_ID` | No* | Deposit recipient (Latanya Mcgriff, in the Personal workspace's recipient list) |
+| `MERCURY_DEPOSIT_METHOD` | No | `ach` or `domesticWire` for the deposit leg. Same resolution rules as `MERCURY_RENT_HOLD_METHOD` |
 
 \* Not strictly required, but absence triggers an interactive picker
 that writes the resulting ID back to the env file.
@@ -94,16 +98,18 @@ The script is partially interactive. Prompts appear in this order
 during a typical run:
 
 1. Mercury account picker(s) — only when the corresponding env var is
-   unset. One picker per missing account.
-2. Mercury recipient picker — when `MERCURY_RENT_HOLD_RECIPIENT_ID` is
-   unset.
-3. Rent-hold method picker — when `MERCURY_RENT_HOLD_METHOD` is unset
-   *and* the recipient supports both ACH and wire.
+   unset. One picker per missing account (Business accounts first, then
+   the Personal-workspace deposit source).
+2. Mercury recipient picker — when `MERCURY_RENT_HOLD_RECIPIENT_ID` or
+   `MERCURY_DEPOSIT_RECIPIENT_ID` is unset.
+3. Method picker — when `MERCURY_RENT_HOLD_METHOD` /
+   `MERCURY_DEPOSIT_METHOD` is unset *and* the recipient supports both
+   ACH and wire.
 4. Per-cash-employee net pay (currently dormant — `cashEmployees`
    slice is empty).
-5. Transfer approval (`y/n`) — once for the internal-transfer batch
-   and once for the external (rent-hold) transfer. Suppressed by
-   `--auto-approve-transfers`.
+5. Transfer approval (`y/n`) — once for the internal-transfer batch,
+   once for the external (rent-hold) transfer, and once for the deposit
+   transfer. Suppressed by `--auto-approve-transfers`.
 
 All picker selections are persisted to the env file so subsequent runs
 are non-interactive unless the underlying Mercury data changes.

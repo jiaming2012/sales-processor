@@ -121,6 +121,7 @@ const (
 	// SendMoneyPurpose categories. Only the ones we actually use are listed;
 	// see Mercury API docs for the full set.
 	MercuryPurposeTransferToMyExternalAccount = "transferToMyExternalAccount"
+	MercuryPurposeEmployee                    = "employee"
 )
 
 type MercurySendMoneyPurposeSimple struct {

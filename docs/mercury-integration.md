@@ -2,37 +2,51 @@
 
 ## Purpose
 
-Dispatch three categories of bank transfers per pay period from a
-Mercury Business workspace, with idempotent reruns so re-running the
-script does not duplicate transfers.
+Dispatch four categories of bank transfers per pay period — three from
+the Mercury Business workspace, one from the Mercury Personal
+workspace — with idempotent reruns so re-running the script does not
+duplicate transfers.
 
 ## Transfer Categories
 
-| Kind | Destination type | API path | Triggering condition |
-|---|---|---|---|
-| `sales_tax` | Internal account (Business workspace) | `POST /transfer` (internal) | `weeklySummary.SalesTax > 0` |
-| `deferred_taxes` | Internal account (Business workspace) | `POST /transfer` (internal) | `payrollTaxes > 0` |
-| `rent_hold` | External recipient (Personal account) | `POST /account/{id}/transactions` (recipient flow) | `rentHoldAmount > 0` |
+| Kind | Source workspace | Destination type | API path | Triggering condition |
+|---|---|---|---|---|
+| `sales_tax` | Business | Internal account | `POST /transfer` (internal) | `weeklySummary.SalesTax > 0` |
+| `deferred_taxes` | Business | Internal account | `POST /transfer` (internal) | `payrollTaxes > 0` |
+| `rent_hold` | Business | External recipient (Personal account) | `POST /account/{id}/transactions` (recipient flow) | `rentHoldAmount > 0` |
+| `deposit` | Personal | External recipient (Latanya Mcgriff) | `POST /account/{id}/transactions` (recipient flow) | `depositAmount > 0` **and** `rent_hold` is sent (or zero) |
 
 The rent-hold leg cannot use the internal-transfer endpoint because the
 destination ("Personal Vacation Fun", ending ••6343) lives in a
 separate Mercury Personal workspace not reachable via the business
 workspace's API key.
 
+The deposit leg pays Latanya her "Deposit" line from the payroll report
+(net pay after the rent hold is removed). It dispatches from the
+Personal workspace — where the rent hold lands — through a second
+Mercury client authenticated with `MERCURY_PERSONAL_API_KEY`. It is
+gated on the rent-hold leg: if the rent hold is pending or failed, the
+deposit prints a `[pending]` line and leaves the ledger untouched so
+the next run re-attempts it. A rent hold sent earlier in the same run
+unblocks the deposit immediately.
+
 ## Resolution Flow
 
 ```
 1. ListAccounts        → resolve source / sales-tax / deferred-tax accounts
-                         via env var or interactive picker
+                         via env var or interactive picker (Business client)
 2. ListRecipients      → resolve rent-hold recipient via env var or picker
-3. resolveRentHoldMethod (ACH vs domesticWire) for the rent-hold leg
-4. Load transfer ledger for this pay period
-5. For each kind in order:
+3. resolveExternalMethod (ACH vs domesticWire) for the rent-hold leg
+4. Repeat 1–3 with the Personal client (MERCURY_PERSONAL_API_KEY):
+     resolve deposit source account, deposit recipient (Latanya),
+     and deposit method
+5. Load transfer ledger for this pay period
+6. For each kind in order (deposit last, gated on rent_hold sent):
      - skip if ledger says status=sent
      - build request with stable idempotency key
      - dispatch through executeTransfers / executeExternalTransfer
      - record outcome in ledger
-6. Save ledger
+7. Save ledger
 ```
 
 ## Account & Recipient Resolution
@@ -60,13 +74,19 @@ The recipient picker shows bank name + last-4 + method capability tag
 | `MERCURY_DEFERRED_TAX_ACCOUNT_ID` | Deferred payroll tax account |
 | `MERCURY_RENT_HOLD_RECIPIENT_ID` | External recipient for rent hold |
 | `MERCURY_RENT_HOLD_METHOD` | `ach` or `domesticWire` (persisted choice) |
+| `MERCURY_PERSONAL_API_KEY` | Mercury Personal workspace API key (required — deposit leg) |
+| `MERCURY_PERSONAL_SOURCE_ACCOUNT_ID` | Personal-workspace source account for the deposit |
+| `MERCURY_DEPOSIT_RECIPIENT_ID` | External recipient for the deposit (Latanya Mcgriff) |
+| `MERCURY_DEPOSIT_METHOD` | `ach` or `domesticWire` (persisted choice) |
 | `MERCURY_SANDBOX` | When `true`, all env-file writes target `.env.sandbox` |
 
 The legacy `MERCURY_RENT_HOLD_ACCOUNT_ID` is dead and ignored.
 
-## Rent-Hold Method Resolution
+## External Method Resolution
 
-`resolveRentHoldMethod(recipient, envVar)` in `main.go`:
+`resolveExternalMethod(recipient, envVar, label)` in `main.go` — shared
+by the rent-hold leg (`MERCURY_RENT_HOLD_METHOD`) and the deposit leg
+(`MERCURY_DEPOSIT_METHOD`):
 
 1. If `envVar` is set, validate it is `ach`/`domesticWire` *and* that
    the recipient has the matching routing on file. Fatal on mismatch.
@@ -96,6 +116,21 @@ When `method == "domesticWire"`, the transfer payload includes:
 Mercury rejects wires without `purpose`. ACH transfers omit it. This
 validation is enforced inside the Mercury client as well.
 
+The deposit leg uses category `employee` (Latanya is being paid wages —
+`transferToMyExternalAccount` only applies to the operator's own
+accounts, like the rent hold):
+
+```json
+{
+  "purpose": {
+    "simple": {
+      "category": "employee",
+      "additionalInfo": "Pay deposit <fromDate> - <toDate>"
+    }
+  }
+}
+```
+
 ## Transfer Ledger
 
 ### Purpose
@@ -120,7 +155,8 @@ One JSON file per pay period at `output/transfers/transfers_<toDate>.json`:
       "idempotencyKey": "2026-05-31-sales_tax"
     },
     "deferred_taxes": { ... },
-    "rent_hold": { ... }
+    "rent_hold": { ... },
+    "deposit": { ... }
   }
 }
 ```
@@ -149,7 +185,8 @@ One JSON file per pay period at `output/transfers/transfers_<toDate>.json`:
 ### Override CLI
 
 `--force-resend=<comma-separated kinds>` where each kind is one of
-`sales_tax`, `deferred_taxes`, `rent_hold`, or the literal `all`.
+`sales_tax`, `deferred_taxes`, `rent_hold`, `deposit`, or the literal
+`all`.
 
 Examples:
 - `--force-resend=rent_hold` — only reissue rent hold
@@ -183,6 +220,13 @@ External block:
 
 Execute external transfer? (y/n):
 ```
+
+The deposit leg renders the same external block from the Personal
+source account (e.g. `$812.44 from Personal Checking ••6343 → Latanya
+Mcgriff · <bank> ••<last4> [domesticWire] (Pay deposit ...)`), with its
+own y/n prompt. When the rent hold has not been sent yet, the deposit
+prints `[pending] deposit ($... → ...) waiting on rent hold` instead of
+prompting.
 
 Source and destination are both rendered as `<account name> ••<last4>`
 for symmetric readability. External destinations additionally include

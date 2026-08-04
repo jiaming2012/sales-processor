@@ -969,8 +969,8 @@ func resolveMercuryAccount(accounts []external.MercuryAccount, envVar string, la
 	return acct
 }
 
-func pickRentHoldMethod(recipient external.MercuryRecipient) string {
-	fmt.Printf("\nSelect rent hold transfer method for %s:\n", recipient.Name)
+func pickExternalMethod(recipient external.MercuryRecipient, label string) string {
+	fmt.Printf("\nSelect %s transfer method for %s:\n", label, recipient.Name)
 	fmt.Printf("  1) ACH (free, 0-1 business days)\n")
 	fmt.Printf("  2) Domestic wire (same day, may incur fee)\n")
 	var choice int
@@ -988,12 +988,12 @@ func pickRentHoldMethod(recipient external.MercuryRecipient) string {
 	return external.MercuryPaymentMethodDomesticWire
 }
 
-func resolveRentHoldMethod(recipient external.MercuryRecipient, envVar string) string {
+func resolveExternalMethod(recipient external.MercuryRecipient, envVar string, label string) string {
 	supportsACH := recipient.ElectronicRoutingInfo != nil
 	supportsWire := recipient.DomesticWireRoutingInfo != nil
 
 	if !supportsACH && !supportsWire {
-		log.Fatalf("rent hold recipient %s (%s) has no ACH or domestic wire routing — add routing in Mercury", recipient.Name, recipient.ID)
+		log.Fatalf("%s recipient %s (%s) has no ACH or domestic wire routing — add routing in Mercury", label, recipient.Name, recipient.ID)
 	}
 
 	if method := os.Getenv(envVar); method != "" {
@@ -1009,20 +1009,20 @@ func resolveRentHoldMethod(recipient external.MercuryRecipient, envVar string) s
 		default:
 			log.Fatalf("%s=%s is invalid (must be %s or %s)", envVar, method, external.MercuryPaymentMethodACH, external.MercuryPaymentMethodDomesticWire)
 		}
-		log.Infof("Using rent hold method: %s", method)
+		log.Infof("Using %s method: %s", label, method)
 		return method
 	}
 
 	if supportsACH && !supportsWire {
-		log.Infof("Using rent hold method: %s (only method supported by recipient)", external.MercuryPaymentMethodACH)
+		log.Infof("Using %s method: %s (only method supported by recipient)", label, external.MercuryPaymentMethodACH)
 		return external.MercuryPaymentMethodACH
 	}
 	if supportsWire && !supportsACH {
-		log.Infof("Using rent hold method: %s (only method supported by recipient)", external.MercuryPaymentMethodDomesticWire)
+		log.Infof("Using %s method: %s (only method supported by recipient)", label, external.MercuryPaymentMethodDomesticWire)
 		return external.MercuryPaymentMethodDomesticWire
 	}
 
-	method := pickRentHoldMethod(recipient)
+	method := pickExternalMethod(recipient, label)
 	saveEnvVar(envVar, method)
 	return method
 }
@@ -1085,7 +1085,7 @@ func executeExternalTransfer(mercuryClient *external.MercuryClient, sourceAccoun
 func main() {
 	autoApproveTransfers := flag.Bool("auto-approve-transfers", false, "automatically approve Mercury transfers without prompting")
 	mercurySandbox := flag.Bool("sandbox", false, "use Mercury sandbox environment")
-	forceResend := flag.String("force-resend", "", "comma-separated transfer kinds to force re-send (sales_tax, deferred_taxes, rent_hold, all)")
+	forceResend := flag.String("force-resend", "", "comma-separated transfer kinds to force re-send (sales_tax, deferred_taxes, rent_hold, deposit, all)")
 	skipMercury := flag.Bool("skip-mercury", false, "skip Mercury account resolution and transfer dispatch (preview mode — no bank movement)")
 	skipClassify := flag.Bool("skip-classify", false, "skip the Mercury transaction classify pipeline (Pull → Claude → Apply)")
 	skipReceipts := flag.Bool("skip-receipts", false, "skip the HQ COGS fetch and Mercury↔HQ gap check (ship payroll without a COGS section — food cost numbers will be missing)")
@@ -1229,6 +1229,11 @@ func main() {
 		deferredTaxAccount external.MercuryAccount
 		rentHoldRecipient  external.MercuryRecipient
 		rentHoldMethod     string
+
+		mercuryPersonalClient *external.MercuryClient
+		depositSourceAccount  external.MercuryAccount
+		depositRecipient      external.MercuryRecipient
+		depositMethod         string
 	)
 	if *skipMercury {
 		log.Warn("--skip-mercury set: skipping Mercury account resolution and transfer dispatch (no bank movement this run)")
@@ -1266,7 +1271,40 @@ func main() {
 		}
 
 		rentHoldRecipient = resolveMercuryRecipient(routableRecipients, "MERCURY_RENT_HOLD_RECIPIENT_ID", "rent hold (Personal Vacation Fun)")
-		rentHoldMethod = resolveRentHoldMethod(rentHoldRecipient, "MERCURY_RENT_HOLD_METHOD")
+		rentHoldMethod = resolveExternalMethod(rentHoldRecipient, "MERCURY_RENT_HOLD_METHOD", "rent hold")
+
+		// The deposit leg leaves from the Personal workspace (where the
+		// rent hold lands). That workspace has its own API key — the
+		// business key cannot see personal accounts.
+		mercuryPersonalAPIKey := os.Getenv("MERCURY_PERSONAL_API_KEY")
+		if mercuryPersonalAPIKey == "" {
+			log.Fatal("MERCURY_PERSONAL_API_KEY environment variable is required (Mercury Personal workspace key — the deposit wire to Latanya dispatches from there)")
+		}
+
+		mercuryPersonalClient = external.NewMercuryClient(mercuryPersonalAPIKey, *mercurySandbox)
+		personalAccounts, err := mercuryPersonalClient.ListAccounts()
+		if err != nil {
+			log.Fatalf("failed to list Mercury Personal accounts: %v", err)
+		}
+		depositSourceAccount = resolveMercuryAccount(personalAccounts, "MERCURY_PERSONAL_SOURCE_ACCOUNT_ID", "deposit source (Personal)")
+
+		personalRecipients, err := mercuryPersonalClient.ListRecipients()
+		if err != nil {
+			log.Fatalf("failed to list Mercury Personal recipients: %v", err)
+		}
+
+		var routablePersonalRecipients []external.MercuryRecipient
+		for _, r := range personalRecipients {
+			if r.ElectronicRoutingInfo != nil || r.DomesticWireRoutingInfo != nil {
+				routablePersonalRecipients = append(routablePersonalRecipients, r)
+			}
+		}
+		if len(routablePersonalRecipients) == 0 {
+			log.Fatalf("no Mercury Personal recipients have ACH or domestic wire routing configured — add Latanya Mcgriff as a recipient in the Personal workspace")
+		}
+
+		depositRecipient = resolveMercuryRecipient(routablePersonalRecipients, "MERCURY_DEPOSIT_RECIPIENT_ID", "deposit (Latanya Mcgriff)")
+		depositMethod = resolveExternalMethod(depositRecipient, "MERCURY_DEPOSIT_METHOD", "deposit")
 	}
 
 	//--- Cash Held ---
@@ -1630,6 +1668,9 @@ func main() {
 	reportOutput.WriteString("Sales Commission Breakdown\n")
 	reportOutput.WriteString("-----------------------\n")
 	reportOutput.WriteString("\n")
+	// Latanya's "Deposit" line (net pay after the rent hold is removed) —
+	// captured here so the Mercury dispatch block below can wire it out.
+	depositAmount := 0.0
 	for _, empl := range commissionBasedEmployees {
 		// todo: unify all employee models
 		if empl.IsOwner {
@@ -1656,6 +1697,7 @@ func main() {
 				NetPay: netPay,
 				Taxes:  commissionBasedEmployeesSummary.Taxes + employerTaxes,
 			})
+			depositAmount = commissionBasedEmployeesSummary.GetDeposit()
 		}
 
 		reportOutput.WriteString(commissionBasedEmployeesSummary.Show())
@@ -1846,6 +1888,44 @@ func main() {
 				}
 				outcome := executeExternalTransfer(mercuryClient, sourceAccount, rentHoldRecipient, rentHoldTransfer, *autoApproveTransfers)
 				recordOutcome(ledger, transferledger.KindRentHold, rentHoldAmount, rentHoldMethod, formatRecipientDest(rentHoldRecipient), rentHoldTransfer.IdempotencyKey, outcome)
+			}
+		}
+
+		// Deposit — Latanya's net pay after the rent hold is removed,
+		// dispatched from the Personal workspace. Gated on the rent-hold
+		// leg being sent (checked against the ledger AFTER the block
+		// above, so a rent hold sent this run unblocks it immediately).
+		// When it has to wait, the ledger is left untouched so the
+		// deposit is re-attempted on the next run.
+		rentHoldSent := rentHoldAmount == 0
+		if _, sent := ledger.Sent(transferledger.KindRentHold); sent {
+			rentHoldSent = true
+		}
+		if depositAmount > 0 {
+			if e, sent := ledger.Sent(transferledger.KindDeposit); sent {
+				logSkipped(transferledger.KindDeposit, e)
+			} else if !rentHoldSent {
+				fmt.Printf("[pending] deposit ($%.2f → %s) waiting on rent hold — re-run after the rent-hold transfer is sent\n",
+					depositAmount, formatRecipientDest(depositRecipient))
+			} else {
+				depositTransfer := external.MercuryExternalTransferRequest{
+					FromAccountID:  depositSourceAccount.ID,
+					RecipientID:    depositRecipient.ID,
+					Amount:         depositAmount,
+					Note:           fmt.Sprintf("Pay deposit %s - %s", fromDate, toDate),
+					PaymentMethod:  depositMethod,
+					IdempotencyKey: transferledger.IdempotencyKey(toDate, transferledger.KindDeposit, forcedSet[transferledger.KindDeposit]),
+				}
+				if depositMethod == external.MercuryPaymentMethodDomesticWire {
+					depositTransfer.Purpose = &external.MercurySendMoneyPurpose{
+						Simple: external.MercurySendMoneyPurposeSimple{
+							Category:       external.MercuryPurposeEmployee,
+							AdditionalInfo: fmt.Sprintf("Pay deposit %s - %s", fromDate, toDate),
+						},
+					}
+				}
+				outcome := executeExternalTransfer(mercuryPersonalClient, depositSourceAccount, depositRecipient, depositTransfer, *autoApproveTransfers)
+				recordOutcome(ledger, transferledger.KindDeposit, depositAmount, depositMethod, formatRecipientDest(depositRecipient), depositTransfer.IdempotencyKey, outcome)
 			}
 		}
 
