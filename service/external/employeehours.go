@@ -133,6 +133,7 @@ func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (Sling
 	}
 
 	slingPayroll := make(SlingPayroll)
+	var unapprovedShifts []string
 	for _, dto := range itemsDTO {
 		if len(dto.Projections) == 0 {
 			log.Debugf("skipping %v because it does not have any projections", dto.User)
@@ -160,7 +161,8 @@ func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (Sling
 				if user.HasTag(models.TagCommission) {
 					log.Debugf("surpressing error: commission based employee, %v, is allowed to have unapproved shift %v -> %v", user, itemShift.ClockIn, itemShift.ClockOut)
 				} else {
-					return nil, fmt.Errorf("unapproved shift found for %v from %v -> %v", user.Name(), itemShift.ClockIn, itemShift.ClockOut)
+					unapprovedShifts = append(unapprovedShifts, fmt.Sprintf("%v from %v -> %v", user.Name(), itemShift.ClockIn, itemShift.ClockOut))
+					continue
 				}
 			}
 
@@ -171,6 +173,10 @@ func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (Sling
 			entry.Shifts = append(entry.Shifts, *itemShift)
 			slingPayroll[dto.User.ID] = entry
 		}
+	}
+
+	if len(unapprovedShifts) > 0 {
+		return nil, fmt.Errorf("unapproved shifts found (%d):\n  - %s", len(unapprovedShifts), strings.Join(unapprovedShifts, "\n  - "))
 	}
 
 	return slingPayroll, nil
