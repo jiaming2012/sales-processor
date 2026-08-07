@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -112,24 +113,17 @@ func (c *slingTimesheetClient) Users() []models.SlingUser {
 func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (SlingPayroll, error) {
 	timesheetURL := fmt.Sprintf("%s/reports/timesheets?dates=%sT00:00:00Z/%sT23:59:59Z", c.baseURL, fromDate, toDate)
 
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", timesheetURL, nil)
+	body, err := c.slingGet(timesheetURL)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Set("Authorization", c.authKey)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
 
 	var itemsDTO []SlingTimesheetItemDTO
-
-	if err = json.NewDecoder(resp.Body).Decode(&itemsDTO); err != nil {
-		return nil, fmt.Errorf("json decode failure for SlingTimesheetItemDTO: %w", err)
+	if err = json.Unmarshal(body, &itemsDTO); err != nil {
+		// A non-JSON body that slipped past the status check (e.g. a 200 error
+		// page) shows up here as "invalid character '<'"; include a snippet so
+		// the real payload is visible instead of just the parse position.
+		return nil, fmt.Errorf("json decode failure for SlingTimesheetItemDTO: %w (body: %s)", err, bodySnippet(body))
 	}
 
 	slingPayroll := make(SlingPayroll)
@@ -180,6 +174,60 @@ func (c *slingTimesheetClient) GetPayroll(fromDate string, toDate string) (Sling
 	}
 
 	return slingPayroll, nil
+}
+
+// slingGet issues an authenticated GET and returns the response body. Sling
+// serves an HTML error page (not JSON) on auth and rate-limit failures, which
+// otherwise surfaces only as an opaque "invalid character '<'" decode error —
+// so on a non-2xx response this returns a diagnostic error carrying the status
+// and a short body snippet. Transient failures (network errors, HTTP 429 and
+// 5xx) are retried with backoff; other 4xx (401/403/404) fail fast since a
+// retry can't fix them.
+func (c *slingTimesheetClient) slingGet(url string) ([]byte, error) {
+	const attempts = 4
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", c.authKey)
+
+		resp, err := (&http.Client{}).Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			switch {
+			case readErr != nil:
+				lastErr = fmt.Errorf("sling read body: %w", readErr)
+			case resp.StatusCode >= 200 && resp.StatusCode < 300:
+				return body, nil
+			case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+				lastErr = fmt.Errorf("sling %s: %s", resp.Status, bodySnippet(body))
+			default:
+				return nil, fmt.Errorf("sling %s: %s", resp.Status, bodySnippet(body))
+			}
+		}
+
+		if attempt < attempts {
+			log.Warnf("sling GET failed (attempt %d/%d): %v — retrying", attempt, attempts, lastErr)
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		}
+	}
+	return nil, lastErr
+}
+
+// bodySnippet returns a single-line, length-capped preview of a response body
+// for error messages (Sling error pages are multi-line HTML).
+func bodySnippet(body []byte) string {
+	s := strings.Join(strings.Fields(string(body)), " ")
+	const max = 200
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }
 
 // fetchGroups populates c.groups with the names of free-form Sling groups

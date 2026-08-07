@@ -1443,12 +1443,12 @@ func main() {
 
 	currentTimesheet, err := slingClient.GetPayroll(fromDate, toDate)
 	if err != nil {
-		panic(err)
+		log.Fatalf("failed to fetch current timesheet (%s → %s): %v", fromDate, toDate, err)
 	}
 
 	previousTimesheet, err := slingClient.GetPayroll(previousFromDate, previousToDate)
 	if err != nil {
-		panic(err)
+		log.Fatalf("failed to fetch previous timesheet (%s → %s): %v", previousFromDate, previousToDate, err)
 	}
 
 	//--- Mercury Transaction Classification (Claude via CLI) ---
