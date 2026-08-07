@@ -1286,7 +1286,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("failed to list Mercury Personal accounts: %v", err)
 		}
-		depositSourceAccount = resolveMercuryAccount(personalAccounts, "MERCURY_PERSONAL_SOURCE_ACCOUNT_ID", "deposit source (Personal)")
+		depositSourceAccount = resolveMercuryAccount(personalAccounts, "MERCURY_PERSONAL_SOURCE_ACCOUNT_ID", "Latanya's payroll deposit source (Personal — wires out from here)")
 
 		personalRecipients, err := mercuryPersonalClient.ListRecipients()
 		if err != nil {
