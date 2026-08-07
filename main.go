@@ -233,6 +233,10 @@ func fetchToastCSVReports(date string) []*models.OrderDetail {
 	var orderDetails []*models.OrderDetail
 	var paymentDetails []*models.PaymentDetail
 
+	// SFTP transfers can drop mid-read ("connection lost"); retry each
+	// file this many times (reconnecting between attempts) before giving up.
+	const sftpReadAttempts = 4
+
 	for _, localFileName := range []string{"OrderDetails.csv", "AllItemsReport.csv", "AccountingReport.xls", "ItemSelectionDetails.csv", "ModifiersSelectionDetails.csv", "PaymentDetails.csv", "TimeEntries.csv"} {
 		// Download remote file.
 		remoteFileName := fmt.Sprintf("/%s/%s/%s", exportId, date, localFileName)
@@ -257,10 +261,25 @@ func fetchToastCSVReports(date string) []*models.OrderDetail {
 			// can only come from append-mode duplication — safe to dedup.
 			bytes = dedupCSVLines(cached)
 		} else {
+			// ReadAll can fail mid-transfer if the SSH session drops
+			// ("connection lost"). Retry with a fresh handle — client.Download
+			// calls connect(), which re-establishes a dead session before the
+			// next read. Only a persistent failure is fatal.
 			bytes, err = ioutil.ReadAll(file)
-			if err != nil {
+			for retry := 1; err != nil && retry < sftpReadAttempts; retry++ {
 				file.Close()
-				log.Fatalf("failed to read bytes from %s: %v", remoteFileName, err)
+				log.Warnf("read %s dropped (%v) — reconnecting, retry %d/%d", remoteFileName, err, retry, sftpReadAttempts-1)
+				time.Sleep(time.Duration(retry) * 2 * time.Second)
+				if file, err = client.Download(remoteFileName); err != nil {
+					break
+				}
+				bytes, err = ioutil.ReadAll(file)
+			}
+			if err != nil {
+				if file != nil {
+					file.Close()
+				}
+				log.Fatalf("failed to read bytes from %s after %d attempts: %v", remoteFileName, sftpReadAttempts, err)
 			}
 
 			if err = os.MkdirAll(localFilePath, os.ModePerm); err != nil {
