@@ -361,6 +361,11 @@ type MercuryTransactionLite struct {
 	CategoryData    *MercuryCategoryData   `json:"categoryData"`    // null when no custom category set
 	Merchant        *MercuryMerchantData   `json:"merchant"`        // null for non-card transactions or where Mercury hasn't resolved a merchant
 	DashboardLink   string                 `json:"dashboardLink"`
+	// CardID is the id of the card behind this transaction — present on card
+	// payments and refunds (debit or credit), null/empty otherwise. Join it
+	// against MercuryCard.ID (from ListCards) to attribute a purchase to the
+	// cardholder who made it.
+	CardID string `json:"cardId"`
 }
 
 // MercuryCategoryData is the org-wide custom category currently assigned to a
@@ -455,6 +460,37 @@ func MercuryHQGap(txns []MercuryTransactionLite, trackedIDs []string) []MercuryT
 	return gap
 }
 
+// CardholderByBankTx maps a Mercury transaction id (which is HQ's
+// bank_tx_id) to a human label for the cardholder who made the purchase.
+// It joins each card transaction's CardID against the card list: a card
+// with a NameOnCard renders as that name (e.g. "Jamal Cole"); a card with
+// only a last four renders as "card ••1234". Transactions with no card
+// (non-card kinds, or a CardID that doesn't resolve to a labelled card)
+// are omitted, so a missing key means "cardholder unknown" — callers
+// should treat the map as best-effort enrichment, not a complete index.
+func CardholderByBankTx(txns []MercuryTransactionLite, cards []MercuryCard) map[string]string {
+	labelByCardID := make(map[string]string, len(cards))
+	for _, card := range cards {
+		switch {
+		case card.NameOnCard != "":
+			labelByCardID[card.ID] = card.NameOnCard
+		case card.LastFour != "":
+			labelByCardID[card.ID] = "card ••" + card.LastFour
+		}
+	}
+
+	out := make(map[string]string)
+	for _, tx := range txns {
+		if tx.CardID == "" {
+			continue
+		}
+		if label, ok := labelByCardID[tx.CardID]; ok {
+			out[tx.ID] = label
+		}
+	}
+	return out
+}
+
 // ListTransactionsInPeriod returns every Mercury transaction with createdAt
 // in [from, to] inclusive. Both dates are formatted YYYY-MM-DD. Errors hard
 // if the response hits the page limit — Mercury's /transactions endpoint
@@ -492,6 +528,56 @@ func (c *MercuryClient) ListTransactionsInPeriod(from, to time.Time) ([]MercuryT
 		return nil, fmt.Errorf("mercury ListTransactionsInPeriod: response hit page limit (%d) — implement pagination", mercuryListTransactionsLimit)
 	}
 	return envelope.Transactions, nil
+}
+
+// MercuryCard is the subset of a Mercury card the payroll code needs to
+// attribute a card transaction to the person who made it. Returned by
+// GET /cards. NameOnCard is the cardholder printed on the card (e.g.
+// "Jamal Cole"); LastFour is the card's last four PAN digits, used as a
+// fallback label when NameOnCard is blank.
+type MercuryCard struct {
+	ID         string `json:"id"`
+	NameOnCard string `json:"nameOnCard"`
+	LastFour   string `json:"lastFour"`
+	AccountID  string `json:"accountId"`
+	Status     string `json:"status"`
+}
+
+type mercuryListCardsResponse struct {
+	Cards []MercuryCard `json:"cards"`
+}
+
+// ListCards returns every card in the workspace. Used to resolve a
+// transaction's CardID to the cardholder's name for operator-facing
+// messages (e.g. the "who bought this unreceipted item" line in the HQ
+// completeness failure banner).
+//
+// Only the first page is read. YumYums has a handful of cards — far under
+// any page limit — so cursor pagination is intentionally not implemented;
+// revisit if the card count ever grows large.
+func (c *MercuryClient) ListCards() ([]MercuryCard, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/cards", nil)
+	if err != nil {
+		return nil, fmt.Errorf("mercury ListCards: failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mercury ListCards: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mercury ListCards: %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	var envelope mercuryListCardsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("mercury ListCards: failed to decode response: %w", err)
+	}
+	return envelope.Cards, nil
 }
 
 // ListCategories returns every org-wide custom expense category.

@@ -2267,7 +2267,12 @@ func fetchHQPeriodSummary(mercuryClient *external.MercuryClient, from, to time.T
 	}
 
 	if !summary.Completeness.Ready {
-		log.Fatal(formatHQCompletenessFailure(client.BaseURL(), summary))
+		// Best-effort: attribute each unreceipted card purchase to the
+		// cardholder who made it, so the operator knows whose receipt to
+		// chase. Degrades silently (no attribution) when Mercury is
+		// skipped/unreachable — the run fails on completeness either way.
+		cardholders := resolvePendingCardholders(mercuryClient, from, to)
+		log.Fatal(formatHQCompletenessFailure(client.BaseURL(), summary, cardholders))
 	}
 
 	// Mercury↔HQ gap check: Mercury sees card transactions the moment the
@@ -2303,6 +2308,29 @@ func fetchHQPeriodSummary(mercuryClient *external.MercuryClient, from, to time.T
 	return summary
 }
 
+// resolvePendingCardholders builds a bank_tx_id → cardholder-name map for
+// the HQ completeness failure banner by joining Mercury's transactions for
+// the period against its card list. It is best-effort enrichment: it
+// returns nil (no attribution) when Mercury is unavailable (--skip-mercury)
+// or when either Mercury call fails — a degraded banner is strictly better
+// than upgrading a receipt-completeness failure into a Mercury failure.
+func resolvePendingCardholders(mercuryClient *external.MercuryClient, from, to time.Time) map[string]string {
+	if mercuryClient == nil {
+		return nil
+	}
+	txns, err := mercuryClient.ListTransactionsInPeriod(from, to)
+	if err != nil {
+		log.Warnf("cardholder attribution unavailable — Mercury transaction fetch failed: %v", err)
+		return nil
+	}
+	cards, err := mercuryClient.ListCards()
+	if err != nil {
+		log.Warnf("cardholder attribution unavailable — Mercury card fetch failed: %v", err)
+		return nil
+	}
+	return external.CardholderByBankTx(txns, cards)
+}
+
 // formatHQCompletenessFailure renders an operator-friendly multi-line
 // banner for the "HQ has unresolved receipts" failure. The single-line
 // FATA log buried the actionable bits (where to go, what to do) under
@@ -2310,7 +2338,12 @@ func fetchHQPeriodSummary(mercuryClient *external.MercuryClient, from, to time.T
 // the inventory dashboard, and only dumps IDs at the bottom as debug
 // detail. hqBaseURL is the HQ root (typically same origin as the API);
 // HQ serves the static inventory.html UI from there.
-func formatHQCompletenessFailure(hqBaseURL string, s *external.HQPeriodSummary) string {
+//
+// cardholderByBankTx maps a pending receipt's bank_tx_id to the cardholder
+// who made the purchase (e.g. "Jamal Cole"), resolved from Mercury. It is
+// best-effort: nil or a missing key (Mercury skipped/unreachable, or the
+// txn had no card) simply omits the "· <name>" attribution on that row.
+func formatHQCompletenessFailure(hqBaseURL string, s *external.HQPeriodSummary, cardholderByBankTx map[string]string) string {
 	const bar = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	var b strings.Builder
 	pending := len(s.Completeness.PendingReviewIDs)
@@ -2356,7 +2389,11 @@ func formatHQCompletenessFailure(hqBaseURL string, s *external.HQPeriodSummary) 
 				if vendor == "" {
 					vendor = "(vendor unknown)"
 				}
-				fmt.Fprintf(&b, "  - %s  %-22s  $%.2f%s\n", d.EventDate, vendor, d.BankTotal, reasonSuffix)
+				cardholderSuffix := ""
+				if who := cardholderByBankTx[d.BankTxID]; who != "" {
+					cardholderSuffix = "  · " + who
+				}
+				fmt.Fprintf(&b, "  - %s  %-22s  $%.2f%s%s\n", d.EventDate, vendor, d.BankTotal, cardholderSuffix, reasonSuffix)
 			}
 		} else {
 			// Older HQ (pre cogs-hq-pending-details handoff) — only UUIDs available.

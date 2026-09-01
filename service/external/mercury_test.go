@@ -114,3 +114,44 @@ func TestMercuryHQGap(t *testing.T) {
 		})
 	}
 }
+
+// TestCardholderByBankTx covers the join that attributes an unreceipted
+// card purchase to its cardholder for the HQ completeness failure banner:
+// name preferred, last-four fallback, and the several ways a row is
+// legitimately omitted (no card, unknown card, unlabelled card).
+func TestCardholderByBankTx(t *testing.T) {
+	cards := []MercuryCard{
+		{ID: "card_jamal", NameOnCard: "Jamal Cole", LastFour: "1234"},
+		{ID: "card_last4only", NameOnCard: "", LastFour: "9876"},
+		{ID: "card_blank", NameOnCard: "", LastFour: ""},
+	}
+	txns := []MercuryTransactionLite{
+		{ID: "tx_named", CardID: "card_jamal"},        // → name
+		{ID: "tx_last4", CardID: "card_last4only"},    // → last-four fallback
+		{ID: "tx_blankcard", CardID: "card_blank"},    // card carries no label → omit
+		{ID: "tx_unknowncard", CardID: "card_ghost"},  // card not in list → omit
+		{ID: "tx_nocard", CardID: ""},                 // non-card txn → omit
+	}
+
+	got := CardholderByBankTx(txns, cards)
+	want := map[string]string{
+		"tx_named": "Jamal Cole",
+		"tx_last4": "card ••9876",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CardholderByBankTx = %#v, want %#v", got, want)
+	}
+}
+
+// TestCardholderByBankTx_Empty guards the nil-input path: no cards and no
+// txns must yield a usable (non-nil, empty) map, since the banner indexes
+// into it directly.
+func TestCardholderByBankTx_Empty(t *testing.T) {
+	got := CardholderByBankTx(nil, nil)
+	if got == nil {
+		t.Fatal("CardholderByBankTx(nil, nil) = nil, want non-nil empty map")
+	}
+	if len(got) != 0 {
+		t.Errorf("CardholderByBankTx(nil, nil) = %#v, want empty", got)
+	}
+}
